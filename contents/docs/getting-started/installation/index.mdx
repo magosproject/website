@@ -1,0 +1,88 @@
+---
+title: Installation
+description: Install Magos on Kubernetes using the official Helm chart.
+---
+
+<Note type="danger" title="Under Development">
+  Magos is currently in active development. The chart name, values, and distribution URL may change before the first stable release. Follow our GitHub organization for release announcements.
+</Note>
+
+Magos is distributed as a Helm chart and is intended to run inside a Kubernetes cluster.
+
+## Prerequisites
+
+- A Kubernetes cluster (v1.24+ recommended)
+- `kubectl` configured to talk to the cluster
+- Helm v3 installed
+
+## Install with Helm
+
+### 1) Add the chart repository
+
+Add the Magos chart repository and fetch the latest index:
+
+```plaintext
+helm repo add magos https://magosproject.io/charts
+helm repo update
+```
+
+### 2) Install Magos
+
+Install Magos into the `magos` namespace (created automatically if missing):
+
+```plaintext
+helm install magos magos/magos \
+  --namespace magos \
+  --create-namespace
+```
+
+### 3) Verify the installation
+
+Wait for the workloads to become ready:
+
+```plaintext
+kubectl -n magos get pods
+```
+
+## Upgrade
+
+To upgrade an existing installation (or install if it doesn’t exist yet):
+
+```plaintext
+helm upgrade --install magos magos/magos \
+  --namespace magos
+```
+
+## Uninstall
+
+To remove Magos from the cluster:
+
+```plaintext
+helm uninstall magos --namespace magos
+```
+
+## Configuration
+
+Start from the default values and customize as needed:
+
+```plaintext
+helm show values magos/magos > values.yaml
+```
+
+Apply your configuration by passing the values file:
+
+```plaintext
+helm upgrade --install magos magos/magos \
+  --namespace magos \
+  -f values.yaml
+```
+
+## Accessing Magos
+
+Magos typically exposes a Kubernetes Service. If you’re running it with a ClusterIP service (the default in many charts), you can use port-forwarding for local access:
+
+```plaintext
+kubectl -n magos port-forward svc/magos 8080:80
+```
+
+If your chart values expose an ingress or a LoadBalancer service instead, access Magos using the hostname/IP assigned by your cluster.

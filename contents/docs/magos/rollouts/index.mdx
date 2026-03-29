@@ -1,0 +1,57 @@
+---
+title: Rollouts
+description: Learn how Rollouts act as the state machine that orchestrates Terraform Workspace execution across your Projects.
+---
+
+Rollouts represent the foundational orchestration strategy for a Project in Magos. They act as a sophisticated state machine that explicitly controls when individual workspaces are allowed to execute their respective Terraform operations. By enforcing a strict boundary between orchestration via rollouts and execution via workspaces, Magos ensures deterministic deployment ordering without tightly coupling infrastructure components.
+
+## What is a Rollout?
+
+A rollout defines the specific order in which your infrastructure environments should converge to their desired state. Rather than hardcoding dependencies between specific workspaces, a rollout declares an orchestrated strategy comprising sequential steps.
+
+Each step utilizes Kubernetes-native label selectors to dynamically group workspaces. This allows you to say "execute all development environments first, followed by staging, and finally production," without maintaining static lists of resources. The core mechanism a rollout utilizes to push state forward is incredibly simple: it grants permission. By enabling a workspace's internal allowed flag, it tells the passive executor that it is now cleared to run.
+
+## How it Works
+
+The Rollout Controller is responsible for meticulously navigating the state machine defined in your strategy. It processes one rollout strategy at a time, evaluating the label selectors defined in the current step to gather the target workspaces. 
+
+Once the target workspaces are identified, the controller enables their execution. The rollout controller does not run Terraform itself; instead, it flips the allowed parameter on the selected workspaces and shifts into an event-driven observation mode. It continuously monitors the status of these workspaces, waiting for every single selected environment to successfully reach an applied phase.
+
+This workflow guarantees deterministic progression. Once all workspaces in the current step succeed, the rollout naturally advances to the subsequent step, repeating the process. If a failure policy triggers—such as stopping on the first failure—the rollout ceases granting execution permissions, freezing the blast radius immediately.
+
+## Defining a Rollout
+
+A rollout defines exactly how changes flow through your environments. The following example demonstrates a sequential release strategy that deploys to development, then staging, and finally production environments within the referenced project boundary.
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Rollout
+metadata:
+  name: data-platform-rollout
+  namespace: demo
+spec:
+  projectRef: data-platform
+  strategy:
+    steps:
+      - name: dev
+        selector:
+          matchLabels:
+            env: dev
+      - name: staging
+        selector:
+          matchLabels:
+            env: staging
+      - name: prod
+        selector:
+          matchLabels:
+            env: prod
+status:
+  phase: Pending
+  currentStep: 0
+```
+
+## Advanced Orchestration
+
+Because the rollout acts strictly as a state machine governing a boolean flag, it inherently supports advanced deployment patterns. You can limit the maximum number of concurrent workspace executions within a single step to prevent API rate limiting from your cloud providers. You can define aggressive or permissive failure policies. 
+
+Furthermore, this separation of concerns enables future extensibility. Complex Directed Acyclic Graphs (DAGs) for step execution, automated canary deployments, and manual pause gates can all be implemented entirely within the Rollout Controller's state machine, without requiring a single change to the underlying Workspace executor logic. The design provides immense flexibility while maintaining the structural integrity of your deployments.

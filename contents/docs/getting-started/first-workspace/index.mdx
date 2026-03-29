@@ -1,0 +1,78 @@
+---
+title: Your first Workspace
+description: Deploy your first Terraform environment using the Magos controllers by establishing a project boundary and defining a passive workspace executor.
+---
+
+With Magos installed in your Kubernetes cluster, the next step is to deploy an actual infrastructure configuration. We will walk through the process of declaring a foundational Project boundary and then configuring a Workspace to act as the execution engine for a remote Terraform module. 
+
+To keep this initial tutorial focused purely on the execution lifecycle, we will manually authorize the workspace to run, intentionally bypassing the Rollout orchestrator. This allows you to directly observe how the Workspace controller reconciles desired state.
+
+## Establishing the Project
+
+Before a Workspace can exist, it must be logically associated with a Project. The project provides the operational domain for your workspaces and rollouts, allowing you to centralize configurations like shared variables.
+
+Create a file named `project.yaml` and define the fundamental structure for your new infrastructure deployment. In this example, we will create a placeholder project called `data-platform` that establishes a default cloud region for all associated environments.
+
+```yaml
+apiVersion: platform.yourorg.io/v1alpha1
+kind: Project
+metadata:
+  name: data-platform
+  namespace: default
+spec:
+  description: "Core infrastructure for the data engineering team"
+  variables:
+    region: eu-west-1
+```
+
+Apply this configuration to your cluster. The Magos controller will register the project boundary, making it available for downstream workspaces to reference and inherit from.
+
+```plaintext
+kubectl apply -f project.yaml
+```
+
+## Defining the Workspace
+
+With the project boundary established, we can introduce the actual execution layer. The Workspace resource defines the specific target environment, the Git repository containing your Terraform configuration, and the precise revision to execute. 
+
+Create a file named `workspace.yaml`. Notice that we explicitly reference the `data-platform` project created earlier. Crucially, we are setting `spec.rollout.allowed: true` to manually authorize execution immediately upon creation.
+
+```yaml
+apiVersion: platform.yourorg.io/v1alpha1
+kind: Workspace
+metadata:
+  name: data-platform-dev
+  namespace: default
+  labels:
+    project: data-platform
+    env: dev
+spec:
+  projectRef: data-platform
+  variables:
+    instance_size: small
+  terraform:
+    source: git::https://github.com/magosproject/example-infrastructure.git//modules/vpc
+    revision: main
+  rollout:
+    allowed: true
+```
+
+When you apply this manifest, the Workspace controller detects the new resource. Because the `allowed` flag is true, it will not remain idle; it will immediately begin processing the configuration.
+
+```plaintext
+kubectl apply -f workspace.yaml
+```
+
+## Observing Execution
+
+Magos relies entirely on Kubernetes-native status fields to broadcast its internal state machine. You do not need to parse logs to understand what the system is doing; you can simply observe the custom resource.
+
+Watch the workspace object to see the controller progress through its execution phases.
+
+```plaintext
+kubectl get workspace data-platform-dev -w
+```
+
+You will see the `PHASE` column transition as the controller checks out the code, evaluates the Terraform plan, and applies the changes. The progression flows sequentially from `Idle`, into `Planning`, transitioning to `Applying`, and ultimately resting at `Applied`. 
+
+By querying the resource details, you can also inspect the `status.observedRevision` to cryptographically verify exactly which Git commit SHA was applied to your infrastructure environment. Once the phase stabilizes at `Applied`, you have successfully orchestrated your first piece of infrastructure using Magos.

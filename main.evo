@@ -1,0 +1,10 @@
+variable "instance_count": 3
+
+aws::ec2::instance "web_server" {
+  ami:                   "ami-12345678"
+  instance_type:         "t2.micro"
+  freddy_is_really_cool: true
+  tags: {
+    Name: "WebServer"
+  }
+}

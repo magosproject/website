@@ -1,0 +1,50 @@
+---
+title: Workspaces
+description: Understand how Workspaces represent individual Terraform environments and act as passive executors in Magos.
+---
+
+Workspaces form the execution backbone of Magos. They represent an individual Terraform environment—such as your development, staging, or production infrastructure. Every workspace is managed as a distinct Kubernetes Custom Resource, acting as the fundamental atomic unit of deployment within the ecosystem.
+
+## What is a Workspace?
+
+In Magos, workspaces are strictly passive executors. Their singular responsibility within the architecture is to observe their specific desired state, execute the underlying Terraform commands when explicitly authorized, and continuously update their operational status.
+
+A workspace reacts to its declared specification. It observes the desired configuration, such as inherited variables, the source repository containing the Terraform modules, and the specific git revision it should enforce. When granted permission, it orchestrates the Terraform plan and apply operations natively. Following an execution cycle, the workspace strictly reports its phase—whether it is idle, currently planning, applying changes, successfully applied, or in a failed state.
+
+Most importantly, workspaces are designed with absolute isolation. They never coordinate with other workspaces and have absolutely no concept of sibling environments. They do not dictate when they should run relative to other elements in the cluster, completely decoupling execution mechanics from orchestration logic.
+
+## How it Works
+
+The Workspace Controller focuses on exactly one responsibility: resolving the desired state of a given workspace safely and securely. It operates a dedicated reconciliation loop that evaluates one workspace at a time.
+
+The execution of Terraform operations only occurs when allowed. This is controlled entirely by a discrete flag within the specification, which is managed exclusively by a higher-level orchestrator like a Rollout. The controller continually updates the status phase and the observed revision to broadcast its precise state back to the control plane, enabling external systems to react to the workspace's progress without interrogating the execution layer directly.
+
+## Defining a Workspace
+
+A typical Workspace Custom Resource codifies exactly what infrastructure needs to exist and which project boundary it belongs to.
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Workspace
+metadata:
+  name: demo-staging
+  namespace: demo
+  annotations:
+    magosproject.io/reconcile-interval: "5m"
+spec:
+  source:
+    repoURL: https://github.com/magosproject/demo.git
+    targetRevision: main
+    path: .
+    secretRef:
+      name: example
+  terraform:
+    version: "1.15.0"
+    tfvarsPath: env/staging/vars.tfvars
+```
+
+## Design Constraints
+
+The Workspace design strictly avoids dynamic orchestration internally. By keeping workspaces completely isolated from one another, we enforce highly resilient behavior. A catastrophic failure in one workspace cannot inherently corrupt sibling workspaces, nor can it create unpredictable cascading failures. 
+
+Because workspaces only execute when their permission boolean explicitly flips to true, the entire system's behavior remains fiercely predictable. This minimal coupling ensures a workspace requires zero awareness of its neighbors, drastically reducing the complexity of the control plane and making local debugging a localized, straightforward process.

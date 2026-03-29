@@ -1,0 +1,45 @@
+---
+title: Variable Sets
+description: Discover how to manage and propagate project-level variables to Workspaces in Magos.
+---
+
+The Variable Sets system provides a centralized mechanism for defining and propagating reusable configuration parameters across your ecosystem. By managing variables at a higher, strategic level, teams can ensure absolute consistency while drastically reducing the operational redundancy typically found in distributed Terraform configurations.
+
+## What are Variable Sets?
+
+Variables are the lifeblood of modular infrastructure execution. Instead of hardcoding and repeating the exact same base configurations—such as shared cloud regions, mandatory tagging schemas, or organization-wide naming prefixes—in every single individual environment, Magos allows you to define these variables holistically.
+
+Variable Sets leverage the natural hierarchy established by Projects to cascade configuration down to the execution layer. When a workspace is evaluated for execution, it seamlessly inherits the entire set of variables established by its parent project boundary.
+
+## How Propagation Works
+
+The controller utilizes a top-down evaluation model. Projects hold project-level variables that automatically propagate downwards to any implicitly contained workspaces. This guarantees that any workspace spun up within a specific domain will always receive the standardized configuration without developer intervention.
+
+However, Magos recognizes that distinct environments occasionally require specific overrides. While Variable Sets continuously propagate downward, individual workspaces retain the authority to define their own specific, localized variables. If a localized variable key matches an inherited one, the workspace-level definition strictly overrides the project-level default. This provides the safety net of sane defaults while enabling the necessary flexibility for specialized execution.
+
+## Defining Variables
+
+As demonstrated in the overarching architecture, variables play a critical role right up until the final execution phase within a given Workspace.
+
+```yaml
+apiVersion: platform.yourorg.io/v1alpha1
+kind: Workspace
+metadata:
+  name: data-platform-dev
+  labels:
+    project: data-platform
+    env: dev
+spec:
+  projectRef: data-platform
+  # These variables seamlessly merge with those inherited from the 
+  # data-platform project, taking precedence during conflict.
+  variables:
+    region: eu-west-1
+    instance_size: small
+```
+
+## Design Constraints
+
+The design of Variable Sets is deeply anchored in minimal coupling. Workspaces are fundamentally unaware of where their variables originate. They do not query the project directly, nor do they understand the difference between locally defined parameters and inherited defaults. The control plane handles this resolution phase entirely, feeding the final mapped set directly to the workspace prior to its execution.
+
+This approach ensures fiercely predictable behavior. Because variables propagate cleanly and predictably from Projects down to Workspaces—and because the overriding logic is universally strict—engineering teams can easily audit the configuration, trace the origin of a specific value, and guarantee that the resulting Terraform plan is derived from a highly deterministic set of inputs.

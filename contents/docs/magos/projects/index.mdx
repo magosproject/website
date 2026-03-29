@@ -1,0 +1,40 @@
+---
+title: Projects
+description: Discover how projects serve as the logical grouping mechanism for your Terraform workspaces and rollouts within Magos.
+---
+
+Projects in Magos provide a unified boundary for a set of related workspaces and orchestration strategies. They act as the top-level grouping mechanism that ensures configurations, variables, and rollout steps remain organized, scoped, and highly predictable for infrastructure engineering teams.
+
+## What is a Project?
+
+A project is not an active executor, but rather a foundational grouping layer that your Rollouts and Workspaces reference. It collects related workspaces—such as all environments for a specific data platform, microservice, or infrastructure tier—into a single logical entity. By keeping this boundary distinct, teams can manage complex topologies without tangling orchestration logic into the resource definitions themselves.
+
+When you define a project, you establish the domain in which variables are shared and rollouts operate. The project holds structural metadata but delegates all active reconciliation to the downstream controllers designed for those specific jobs.
+
+## Defining a Project
+
+A Project Custom Resource specifies the logical boundaries for its dependent workspaces and associates reusable configuration schemas, such as Variable Sets. 
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Project
+metadata:
+  name: data-platform
+  namespace: demo
+spec:
+  description: "Data Platform project grouping Workspaces"
+  variableSetRef:
+    - name: data-platform-vars
+```
+
+## How it Works
+
+The lifecycle of a project revolves around scope definition and variable propagation. Rather than holding variables directly, a Project references centralized Variable Sets that automatically propagate downwards to any contained workspaces, ensuring absolute consistency across environments. If you need a shared region, a set of default tags, or an inherited naming convention, the project delegates these through its variable set references transparently.
+
+When a Rollout executes, it targets a specific Project to orchestrate its underlying workspaces. The rollout relies on the project boundary to know which resources it is allowed to evaluate. The project essentially draws a perimeter, inside of which the state machines of Magos safely operate.
+
+## Design Constraints
+
+Our approach to Projects follows Magos's strict design constraints regarding separation of concerns. Projects group and configure, but they explicitly do not execute Terraform. That responsibility is delegated entirely to Workspaces. 
+
+Furthermore, we enforce minimal coupling by requiring Workspaces to reference a project via a declarative configuration block, maintaining a clean, deterministic hierarchy without bidirectional dependencies. By maintaining Projects as a pure grouping mechanism, we ensure that scaling your infrastructure configuration remains predictable and easy to manage, preventing the tangled architectures that often plague large-scale infrastructure-as-code deployments.
