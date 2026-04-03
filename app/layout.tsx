@@ -4,6 +4,7 @@ import { Navbar } from "@/components/navbar";
 import { Space_Mono, Inter } from "next/font/google";
 import { Footer } from "@/components/footer";
 import { SpeedInsights } from "@vercel/speed-insights/next";
+import { Analytics } from "@vercel/analytics/next";
 import "@/styles/globals.css";
 
 const sansFont = Inter({
@@ -65,6 +66,7 @@ export default function RootLayout({
           <Footer />
         </ThemeProvider>
         <SpeedInsights />
+        <Analytics />
       </body>
     </html>
   );
