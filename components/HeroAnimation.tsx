@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { Layers, Database, Cloud, Zap, ArrowRight, Play, Settings2 } from "lucide-react";
+import { Layers, Zap, Settings2 } from "lucide-react";
 import { Icon } from "@iconify/react";
 
 interface FlowItem {
