@@ -29,8 +29,15 @@ export const metadata: Metadata = {
   metadataBase: new URL("https://magos.systems/"),
   description: "Infrastructure as Code, made easy—for any cloud, at any scale.",
   icons: {
-    icon: "/favicon.ico",
-    apple: "/public/apple-touch-icon.png",
+    icon: [
+      { url: "/favicon-16x16.png", sizes: "16x16", type: "image/png" },
+      { url: "/favicon-32x32.png", sizes: "32x32", type: "image/png" },
+      { url: "/favicon.ico" },
+    ],
+    apple: "/apple-touch-icon.png",
+    other: [
+      { rel: "manifest", url: "/site.webmanifest" },
+    ],
   },
 };
 
