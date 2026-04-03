@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { TerminalSquareIcon, CheckIcon, ShieldCheckIcon, ZapIcon, GitBranchIcon, Github, Layers, PlaySquare, Settings2, GitMerge } from "lucide-react";
+import { CheckIcon, ShieldCheckIcon, Github, Layers, PlaySquare, Settings2, GitMerge } from "lucide-react";
 import { Si1password, SiAirbnb, SiLufthansa, SiMcdonalds, SiPaloaltonetworks, SiStarbucks } from "@icons-pack/react-simple-icons";
 import HeroAnimation from "@/components/HeroAnimation";
 
@@ -16,9 +16,9 @@ export default function Home() {
             An open-source Kubernetes Operator that brings declarative GitOps orchestration and state-machine predictability directly to your Terraform environments.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-            <a href="/docs/getting-started" className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-11 px-8 py-2">
+            <Link href="/docs/getting-started" className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-11 px-8 py-2">
               Get Started
-            </a>
+            </Link>
             <a href="https://github.com/magosproject" target="_blank" rel="noreferrer" className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-11 px-8 py-2">
               <Github className="mr-2 h-5 w-5" />
               GitHub
