@@ -1,0 +1,290 @@
+---
+title: OpenID Connect (OIDC)
+description: Authenticate users through your identity provider and map their claims to Kubernetes role bindings.
+---
+
+OIDC is the recommended authentication path for any Magos install past the bootstrap stage. The API server uses the OAuth 2.0 Authorization Code flow with PKCE; the client is public, so there is no client secret to manage. The UI initiates the flow, the IdP authenticates the user, and the API server verifies the resulting ID token against the IdP's JWKS using `coreos/go-oidc`. From that point on, the user's claims drive every authorisation decision Magos makes.
+
+Authorisation itself does not happen inside Magos. The middleware looks up Kubernetes ServiceAccounts whose annotations match the user's verified claims and runs `SubjectAccessReview` against each one for every request. The implication is that you grant a user permissions by binding RBAC roles to those ServiceAccounts, the same way you would for any other Kubernetes workload. There is no separate Magos permission model.
+
+## Enabling OIDC
+
+The minimal values to switch OIDC on:
+
+```yaml
+api:
+  oidc:
+    enabled: true
+    issuerURL: "https://example.okta.com/oauth2/default"
+    clientID: "0oa1abc2defGHIJK3l4"
+    cliClientID: "0oa1abc2defGHIJK3l4"
+    additionalScopes:
+      - groups
+    usernameClaim: email
+    admins:
+      claims:
+        groups:
+          - platform-eng
+    projectCreators:
+      claims:
+        groups:
+          - sre
+    users:
+      claims:
+        groups:
+          - infra-engineering
+    viewers:
+      claims:
+        groups:
+          - compliance@example.com
+    globalServiceAccounts:
+      namespaces: []
+```
+
+What each value does:
+
+- `api.oidc.enabled`. Toggles the entire OIDC code path. When `false`, the API server does not even start the OIDC verifier.
+- `api.oidc.issuerURL`. The IdP's issuer URL. The API server fetches `<issuerURL>/.well-known/openid-configuration` at startup and caches the JWKS for token verification.
+- `api.oidc.clientID`. The public OAuth client the browser-based UI uses. Configure this client in your IdP with the Authorization Code + PKCE grant and `<api-base-url>/login` as the redirect URI.
+- `api.oidc.cliClientID`. The public client used by command-line tools. May be the same as `clientID` if your IdP allows multiple redirect URIs on one client, or a separate client if you prefer to track CLI traffic independently. The CLI's redirect URI is a local loopback address.
+- `api.oidc.additionalScopes`. Scopes requested beyond the implicit `openid profile email`, which the API server always adds. Default is `[groups]` so the ID token includes the user's group memberships; add anything else your claim mapping references.
+- `api.oidc.usernameClaim`. The claim used as the display name in the UI's account menu and as the subject in audit fields. Default `email`. Change to `preferred_username` or `sub` if your IdP populates those instead.
+- `api.oidc.<role>.claims`. A map from claim name to allowed values for each of the four built-in role buckets (`admins`, `projectCreators`, `users`, `viewers`). The middleware accepts the user into a role when any listed value matches the user's claim. See the next section for the full mechanism.
+- `api.oidc.globalServiceAccounts.namespaces`. Extra namespaces the middleware scans for claim-annotated ServiceAccounts. The release namespace is always searched.
+
+## The flow at a glance
+
+When OIDC is enabled, the sequence for an interactive user is:
+
+1. The UI generates a PKCE verifier and code challenge, then redirects the browser to `<issuerURL>/authorize?...&code_challenge=...&client_id=<clientID>`.
+2. The IdP authenticates the user with whatever factor it requires and redirects back to `<api-base-url>/login?code=...&state=...`.
+3. The API server exchanges the authorisation code (with the original PKCE verifier) for an ID token.
+4. The API server verifies the ID token signature against the IdP's JWKS, checks `iss`, `aud`, and `exp`, and extracts the configured claims.
+5. The middleware enumerates ServiceAccounts in the release namespace and any `globalServiceAccounts.namespaces`, plus any project namespace the request targets, and selects every ServiceAccount whose claim annotations are satisfied by the user's ID token.
+6. The matched ServiceAccount set is cached on the request. Every subsequent `SubjectAccessReview` runs against one of those ServiceAccounts.
+
+The token the API server hands back to the UI is the IdP's original ID token, not a re-minted Magos token. The TTL is whatever the IdP set. When it expires, the UI re-runs the PKCE dance.
+
+## Claim-to-ServiceAccount mapping
+
+The mapping is the load-bearing piece. The chart deploys four system ServiceAccounts in the release namespace:
+
+- `magos-admin`
+- `magos-project-creator`
+- `magos-user`
+- `magos-viewer`
+
+Each carries a label `rbac.magosproject.io/system-role: "true"` and, when the corresponding `api.oidc.<role>.claims` block in values is set, an annotation `rbac.magosproject.io/claims` that holds the claim map as JSON. So for the values block earlier in this page, the `magos-admin` ServiceAccount ends up looking like:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: magos-admin
+  namespace: magos
+  labels:
+    rbac.magosproject.io/system-role: "true"
+  annotations:
+    rbac.magosproject.io/claims: '{"groups":["platform-eng"]}'
+```
+
+When `groups: platform-eng` appears in a user's ID token, the middleware matches this ServiceAccount, and the user inherits everything the `magos-admin` ClusterRole grants.
+
+There are two annotation forms the middleware understands, and you can use either or both on any ServiceAccount you create yourself:
+
+1. Per-claim annotations, one annotation per claim, values comma-separated:
+
+   ```yaml
+   metadata:
+     annotations:
+       rbac.magosproject.io/claim.groups: "platform-eng,sre"
+       rbac.magosproject.io/claim.email: "alice@example.com,bob@example.com"
+   ```
+
+2. A single JSON annotation:
+
+   ```yaml
+   metadata:
+     annotations:
+       rbac.magosproject.io/claims: '{"groups":["platform-eng","sre"],"email":["alice@example.com","bob@example.com"]}'
+   ```
+
+The chart uses form 2 for its system ServiceAccounts. Form 1 is more convenient to write by hand. The match semantics are identical: a ServiceAccount matches when, for every claim listed in its annotations, the user's ID token contains at least one of the listed values.
+
+## Built-in role accounts
+
+The four system ServiceAccounts are paired with four built-in ClusterRoles. The chart binds each ServiceAccount to its matching ClusterRole through a ClusterRoleBinding when `rbac.installClusterRoleBindings` is `true` (the default).
+
+| ServiceAccount | ClusterRole verbs |
+| --- | --- |
+| `magos-admin` | Full verbs on `projects`, `workspaces`, `rollouts`, `variablesets` in the `magosproject.io` API group; `patch` on `workspaces/status`; `get/list/watch` on core `events`, `namespaces`, `serviceaccounts`, and RBAC `roles`/`rolebindings`. |
+| `magos-project-creator` | `create/get/list/watch` on `projects`, plus `get/list/watch` on `namespaces`. |
+| `magos-user` | `get/list/watch` on `projects` and `namespaces`. Per-project verbs are added by operators with their own `RoleBinding`s. |
+| `magos-viewer` | `get/list/watch` on every Magos resource and the core/RBAC resources used for display. |
+
+The verb sets are tuned for typical platform-team roles. To extend any of them without forking the chart, set `api.clusterRoles.<name>.additionalRules` in values; the chart appends those rules to the built-in ClusterRole. For example:
+
+```yaml
+api:
+  clusterRoles:
+    magosUser:
+      additionalRules:
+        - apiGroups: ["magosproject.io"]
+          resources: ["workspaces"]
+          verbs: ["get", "list", "watch"]
+```
+
+If you do not want the chart to install these ClusterRoles at all (perhaps you manage them with a separate GitOps pipeline), set `rbac.installClusterRoles: false`. The corresponding bindings are controlled independently by `rbac.installClusterRoleBindings`.
+
+## Adding custom roles
+
+Built-in roles cover the common platform-team buckets. For anything else, write a `ClusterRole` and a `ClusterRoleBinding` to your own ServiceAccount, then annotate that ServiceAccount with the claims that should map to it.
+
+A complete cluster-scoped example for a `release-manager` role that can only manage Rollouts:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: magos-release-manager
+rules:
+  - apiGroups: ["magosproject.io"]
+    resources: ["rollouts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: magos-release-manager
+  namespace: magos
+  annotations:
+    rbac.magosproject.io/claim.groups: "release-managers"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: magos-release-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: magos-release-manager
+subjects:
+  - kind: ServiceAccount
+    name: magos-release-manager
+    namespace: magos
+```
+
+The ServiceAccount lives in the release namespace, so the middleware picks it up by default. If you want to keep custom role ServiceAccounts in a separate namespace, list that namespace in `api.oidc.globalServiceAccounts.namespaces` so the middleware scans it.
+
+## Per-project bindings
+
+Project namespaces are special. Every namespace Magos owns carries the label `magosproject.io/project=true`, and the auth middleware scans those namespaces in addition to the global set when the request targets a resource inside them. That makes it straightforward to grant a team access to a specific project without giving them anything cluster-wide.
+
+A worked example: grant the `team-finance` group `get/list/watch` on Workspaces inside the `finance-prod` project namespace.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: finance-readers
+  namespace: finance-prod
+  annotations:
+    rbac.magosproject.io/claim.groups: "team-finance"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: finance-readers
+  namespace: finance-prod
+rules:
+  - apiGroups: ["magosproject.io"]
+    resources: ["workspaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: finance-readers
+  namespace: finance-prod
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: finance-readers
+subjects:
+  - kind: ServiceAccount
+    name: finance-readers
+    namespace: finance-prod
+```
+
+When a user whose ID token contains `groups: team-finance` issues a request that touches `finance-prod`, the middleware resolves the `finance-readers` ServiceAccount and runs `SubjectAccessReview` against it. The same user has no implicit access to other project namespaces because the matching ServiceAccount only exists in `finance-prod`.
+
+Use the same pattern with `Role` + `RoleBinding` to express any per-project verb set. The pattern composes: a user can carry both a cluster-wide system role (for example `magos-user`) and an additional per-project role for the namespaces they own.
+
+## Username claim
+
+`api.oidc.usernameClaim` controls which claim the UI shows in the header menu and which value appears as the principal in API logs. The default is `email`. Common alternatives:
+
+- `preferred_username`: Microsoft Entra ID, Keycloak.
+- `email`: Auth0, Google, Okta.
+- `sub`: any IdP where you do not want to surface user emails to the UI.
+
+The claim is read off the verified ID token and not used for authorisation. Authorisation always goes through claim mapping to ServiceAccounts.
+
+## IdP PKCE requirement
+
+The API server's OIDC client is configured as a public client and exchanges the authorisation code with PKCE only. The IdP must support public clients with PKCE.
+
+Identity providers that do not support that mode require an intermediate bridge. Magos ships Dex for that purpose: configure Dex with the upstream IdP as a connector, and Magos talks to Dex with PKCE while Dex talks to the IdP with whatever flow the upstream needs. See [Dex identity bridge](/docs/operations/authentication/dex) for the configuration.
+
+Common cases that need the Dex bridge:
+
+- LDAP or Active Directory direct binds.
+- SAML-only IdPs.
+- IdPs that only support confidential clients with a shared client secret.
+
+## Worked example: Okta
+
+Okta supports public OIDC clients with PKCE directly, so no Dex bridge is needed.
+
+In Okta:
+
+1. Create a new application of type **OIDC - Single-Page Application**.
+2. Set sign-in redirect URI to `<api-base-url>/login`.
+3. Enable the **Authorization Code** grant and the **Interaction Code** if you use Okta MFA.
+4. Grant the `groups` claim to ID tokens via an Authorization Server claim definition. The simplest mapping is filter `Matches regex .*` against the user's group memberships.
+5. Note the issuer URL (`https://<your-org>.okta.com/oauth2/default` for the default authorization server) and the client ID.
+
+In Magos values:
+
+```yaml
+api:
+  oidc:
+    enabled: true
+    issuerURL: "https://acme.okta.com/oauth2/default"
+    clientID: "0oa1abc2defGHIJK3l4"
+    cliClientID: "0oa1abc2defGHIJK3l4"
+    additionalScopes:
+      - groups
+    usernameClaim: email
+    admins:
+      claims:
+        groups:
+          - platform-eng
+    projectCreators:
+      claims:
+        groups:
+          - sre
+    users:
+      claims:
+        groups:
+          - infra-engineering
+    viewers:
+      claims:
+        groups:
+          - compliance@example.com
+```
+
+After `helm upgrade`, log in as an Okta user who is a member of `platform-eng`. The UI's header menu will show the user's email, and every API call will resolve to the `magos-admin` ServiceAccount through claim matching.

@@ -1,8 +1,44 @@
 ---
 title: Introduction
-description: We're an open collective of infrastructure practitioners building tools that prioritize reliability, clarity, and community ownership.
+description: Magos is a Kubernetes-native operator that brings GitOps to Terraform, built by practitioners, for practitioners.
 ---
 
-Foobar
+Magos is a Kubernetes operator that reconciles Terraform configurations the same way Argo CD reconciles application manifests. You describe the desired state of your infrastructure as a small set of Kubernetes [custom resources](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/), and a fleet of focused controllers drives that state from declarative spec to applied reality.
+
+The project exists because the Terraform delivery layer never got the GitOps treatment that the application layer did. CI pipelines, queued shell scripts, and bespoke wrappers have papered over the problem for years, but none of them turn Terraform runs into first-class Kubernetes citizens with the audit trail, [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) story, and reconciliation semantics that platform teams have come to expect from every other workload they run.
+
+## What Magos does
+
+Magos takes four declarative resources, `Project`, `Workspace`, `Rollout`, and `VariableSet`, and turns them into a controller loop that runs `terraform plan` and `terraform apply` for you, on your cluster, under your control.
+
+A Workspace is the unit of execution. It points at a Git source, declares which Terraform version to use, and is reconciled by a controller that creates one short-lived Kubernetes [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/) per phase. Plans and applies happen in isolated runner pods that are torn down as soon as they finish; no long-lived shell, no shared filesystem, no leaked state.
+
+A Project groups related Workspaces, defines shared variable sources, and acts as the boundary at which Rollouts attach. A Rollout adds ordered, label-driven orchestration on top, so you can promote a change from dev to staging to prod with the same vocabulary you already use for application rollouts. A VariableSet folds Kubernetes [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) and [ConfigMaps](https://kubernetes.io/docs/concepts/configuration/configmap/) into Terraform inputs without ever copying their bytes into the CR.
+
+Plan output can be validated against Kyverno `ValidatingPolicy` resources before apply runs, so a non-compliant change is rejected at the plan boundary rather than discovered after the fact. Approval workflows for gated auto-apply are on the roadmap.
+
+## Design principles
+
+Magos is built around three properties we will not trade away:
+
+**Reliable.** Each controller has a single responsibility. Workspaces do not coordinate with each other. Rollouts do not run Terraform. Projects do not execute. The strict separation means a failure in one resource cannot cascade into another, and a regression in one controller can be diagnosed without untangling the others.
+
+**Secure.** Every plan and apply runs in its own pod, with its own service account, and with the minimum RBAC the controller can grant it. Secret-backed variables flow through `valueFrom` so the kubelet performs the read at pod start rather than the controller copying bytes into the resource. There is no central executor, no shared workspace volume across Workspaces, and no place where credentials accumulate.
+
+**Governed by its users.** Magos is fully open source, free forever, and steered by a neutral committee. There is no commercial agenda, no enterprise edition, and no vendor lock-in. We are working toward applying to the Cloud Native Computing Foundation so the project remains a public good independent of any single company.
+
+## Who Magos is for
+
+Magos is for platform and infrastructure engineers who already run Kubernetes and already write Terraform, and who are tired of stitching the two together with CI scripts. If you find yourself reaching for Argo CD when you want application GitOps and reaching for a `terraform-runner` repo when you want infrastructure GitOps, Magos is the missing piece.
+
+It is not a Terraform alternative, and it is not a CI replacement. It is the control plane that lets a Kubernetes cluster reconcile infrastructure with the same primitives it uses to reconcile workloads.
+
+## Working in the open
+
+We approach open source as a practitioner-led project. Development happens in public repositories, design decisions are documented, and we evaluate proposals against the principles above rather than popularity. Anyone who shows up, contributes code or documentation, and engages thoughtfully in design discussions can shape the direction.
+
+We welcome forks and alternatives where our trade-offs do not fit. That is the freedom open source provides, and we celebrate it. Diversity of approaches strengthens the ecosystem, and we would rather hold our principles than try to be everything to everyone.
+
+If you share these values and want a Terraform delivery layer that behaves like a Kubernetes citizen, you are in the right place. Start with the [Quickstart](/docs/getting-started/quickstart), or read [Why Magos?](/docs/getting-started/why-magos) for the longer story.
 
 <Outlet path="../" />

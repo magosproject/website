@@ -1,0 +1,13 @@
+---
+title: Guides
+description: Practical playbooks for connecting Git, managing secrets, gating plans with policy, and orchestrating rollouts.
+---
+
+The Guides section assumes you have read the [Concepts](/docs/concepts) and are ready to wire Magos into your real environment.
+
+- [Connecting Git Repositories](/docs/guides/git): public clones, HTTPS with personal access tokens, and SSH-key authentication via Kubernetes Secrets.
+- [Cloud Provider Credentials](/docs/guides/cloud-credentials): bind a Workspace's runner ServiceAccount to a Google service account, AWS IRSA, or Azure managed identity so Terraform authenticates without static keys.
+- [Policy Validation](/docs/guides/policies): write Kyverno `ValidatingPolicy` resources that gate `terraform apply` on plan output.
+- [Rollout Strategies](/docs/guides/rollout-strategies): labelling conventions, multi-region promotion, and failure handling.
+
+<Outlet path="../" />

@@ -1,0 +1,116 @@
+---
+title: Cloud Provider Credentials
+description: Bind a Workspace's runner ServiceAccount to a Google service account, an AWS IAM role (IRSA), or an Azure managed identity so Terraform authenticates without static keys.
+---
+
+A Magos `Workspace` runs `terraform plan` and `terraform apply` inside short-lived [Pods](https://kubernetes.io/docs/concepts/workloads/pods/). Those Pods need credentials for whatever cloud the module targets. The recommended way to supply them is **keyless**: bind the Pod's Kubernetes [ServiceAccount](https://kubernetes.io/docs/concepts/security/service-accounts/) to a cloud identity (GCP Workload Identity, AWS IRSA, or Azure Workload Identity) and let the provider SDK's ambient credential chain pick it up. No long-lived access keys are ever stored in the cluster.
+
+The single field that wires this up is `spec.serviceAccountName` on the Workspace:
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Workspace
+metadata:
+  name: vpc-prod
+  namespace: infra
+spec:
+  serviceAccountName: terraform-prod   # the runner Pods run as this SA
+  projectRef:
+    name: networking
+  source:
+    repoURL: https://github.com/your-org/infra.git
+    targetRevision: main
+    path: vpc
+  terraform:
+    version: "1.14.8"
+```
+
+When `serviceAccountName` is omitted, plan and apply Pods run as the chart-provided `magos-job` ServiceAccount. Override it per Workspace to attach a cloud identity, isolating each environment's blast radius to its own SA.
+
+<Note type="warning" title="Carry the Kyverno RBAC">
+  If you use [policy validation](/docs/guides/policies), the runner ServiceAccount must keep the same permission the default `magos-job` SA has: `get/list/watch` on `validatingpolicies.policies.kyverno.io`. The plan Pod reads matching policies at run time, so a replacement SA without that RBAC will fail policy evaluation. The `Role`/`RoleBinding` snippets below include it.
+</Note>
+
+## GKE Workload Identity
+
+On a GKE cluster with [Workload Identity Federation for GKE](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity) enabled (always on for Autopilot; enable per node pool on Standard), you grant IAM roles directly to the Kubernetes ServiceAccount's principal identifier. Terraform's `google` provider authenticates through the GKE metadata server — no key file, and no Google service account to manage.
+
+First create the KSA, with the Kyverno RBAC the runner needs:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: terraform-prod
+  namespace: infra
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: magos-job-kyverno-read
+rules:
+  - apiGroups: ["policies.kyverno.io"]
+    resources: ["validatingpolicies"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: terraform-prod-kyverno-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: magos-job-kyverno-read
+subjects:
+  - kind: ServiceAccount
+    name: terraform-prod
+    namespace: infra
+```
+
+Then grant the IAM roles your modules need directly to the KSA principal. The principal identifier encodes the namespace and ServiceAccount name:
+
+```bash
+gcloud projects add-iam-policy-binding projects/PROJECT_ID \
+  --role=roles/editor \
+  --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/infra/sa/terraform-prod" \
+  --condition=None
+```
+
+Replace `PROJECT_ID` with your project ID and `PROJECT_NUMBER` with its numeric project number. Scope roles to the specific resources your module touches rather than granting `roles/editor` project-wide where you can.
+
+Point the Workspace at `terraform-prod` via `spec.serviceAccountName`, and the plan and apply Pods authenticate to Google Cloud as that principal. No `GOOGLE_CREDENTIALS` key file, no Secret.
+
+<Note type="info" title="Impersonating a Google service account instead">
+  If an API you use does not yet support direct principal bindings, or you need to reuse an existing Google service account (GSA), use the impersonation variant: grant the KSA `roles/iam.workloadIdentityUser` on the GSA with member `serviceAccount:PROJECT_ID.svc.id.goog[infra/terraform-prod]`, then annotate the KSA with `iam.gke.io/gcp-service-account: GSA_EMAIL`. Both the binding and the annotation are required.
+</Note>
+
+## AWS IRSA
+
+On EKS, [IAM Roles for Service Accounts (IRSA)](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) federates a Kubernetes ServiceAccount to an IAM role through the cluster's OIDC provider, so the runner Pods assume the role with no static access key. The same `spec.serviceAccountName` mechanism applies — annotate the runner ServiceAccount with `eks.amazonaws.com/role-arn` and point the Workspace at it.
+
+<Note type="info" title="Documentation coming soon">
+  A full worked EKS IRSA walkthrough is on the way. In the meantime, follow the [AWS IRSA setup guide](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) to create the role and annotate the ServiceAccount, then set `spec.serviceAccountName` on your Workspace as shown above.
+</Note>
+
+## Azure Workload Identity
+
+On AKS with [Workload Identity](https://learn.microsoft.com/en-us/azure/aks/workload-identity-overview) enabled, you federate a Kubernetes ServiceAccount to a managed identity, and the `azurerm` provider authenticates through the projected token. As with the other providers, you bind the identity to the runner ServiceAccount and point the Workspace at it via `spec.serviceAccountName`.
+
+<Note type="info" title="Documentation coming soon">
+  A full worked AKS Workload Identity walkthrough is on the way. In the meantime, follow the [Azure Workload Identity guide](https://learn.microsoft.com/en-us/azure/aks/workload-identity-overview) to set up the federated credential and annotate the ServiceAccount.
+</Note>
+
+## Static credentials as a fallback
+
+If your cloud or cluster does not support keyless federation, fall back to a [VariableSet](/docs/concepts/variable-sets) backed by a Kubernetes Secret. The provider's credential env vars (`GOOGLE_CREDENTIALS`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `ARM_CLIENT_SECRET`, ...) are injected into the runner Pods through `valueFrom.secretKeyRef`, so the kubelet reads them at Pod start and the controller process never holds the bytes. Keyless federation is still preferred: there is no key to rotate, leak, or audit.
+
+## How the credential reaches Terraform
+
+Whichever provider you use, the flow is the same and never touches the controller process:
+
+1. The Workspace's `spec.serviceAccountName` selects the runner ServiceAccount.
+2. The cloud's admission webhook (GKE metadata server, EKS pod identity webhook, Azure workload identity webhook) projects a short-lived token into the plan and apply Pods based on the ServiceAccount's annotation.
+3. The Terraform provider's default credential chain finds the projected token and exchanges it for cloud credentials at run time.
+4. The token expires with the Pod. There is nothing persisted to rotate.
+
+See [Security and RBAC](/docs/operations/security) for the full isolation model and [Workspaces](/docs/concepts/workspaces) for the rest of the Workspace spec.

@@ -143,12 +143,31 @@ pre {
   padding: 2px 0 !important;
   width: inherit !important;
   overflow-x: auto;
+  /* Soft card lift in both themes. Concrete colors instead of the
+     theme's --secondary token, since that token resolves to near-white
+     in light mode and disappears against the page background. */
+  background-color: hsl(240 5% 96%) !important;
+  border: 1px solid hsl(240 5% 89%);
+  border-radius: calc(var(--radius) + 2px);
+  box-shadow: 0 1px 2px hsl(240 5% 84% / 0.45);
+}
+
+.dark pre {
+  background-color: hsl(230 7% 14%) !important;
+  border-color: hsl(230 5% 22%);
+  box-shadow: 0 1px 2px hsl(0 0% 0% / 0.35);
+}
+
+pre,
+pre > code {
+  font-size: 1em !important;
 }
 
 pre > code {
   display: grid;
   max-width: inherit !important;
   padding: 14px 0 !important;
+  line-height: 1.65;
 }
 
 .code-line {
@@ -161,9 +180,9 @@ pre > code {
   width: 1rem;
   margin-right: 22px;
   margin-left: -2px;
-  color: rgb(110, 110, 110);
+  color: hsl(var(--muted-foreground) / 0.7);
   content: attr(line);
-  font-size: 13.5px;
+  font-size: 13px;
   text-align: right;
 }
 

@@ -1,0 +1,33 @@
+---
+title: Authentication
+description: How users and machine clients authenticate to the Magos API server.
+---
+
+The Magos API server authenticates every request. There are three principal types:
+
+1. **Admin.** A single built-in account, intended as a bootstrap principal. Disabled once an identity provider is configured. See [Built-in admin account](/docs/operations/authentication/admin-account).
+2. **OIDC user.** Verified against an external identity provider using OAuth 2.0 Authorization Code with PKCE. The user's claims map to Kubernetes ServiceAccounts through annotations, and standard RBAC drives every authorisation decision from there. See [OpenID Connect](/docs/operations/authentication/oidc).
+3. **Kubernetes ServiceAccount.** Bearer token verified by `TokenReview`. Used by the workspace controller's calls into the API server and by any client that already holds a kubeconfig.
+
+If your identity provider does not support public-client PKCE directly, the chart can deploy [Dex](/docs/operations/authentication/dex) as a bridge.
+
+## Exempt routes
+
+The middleware lets the following routes through without authentication, because they exist to support the login flow itself or to expose health and metadata to monitoring:
+
+- `GET /healthz`
+- `GET /readyz`
+- `GET /openapi.json`
+- `GET /docs`
+- `POST /api/v1alpha1/auth/login`
+- `GET /api/v1alpha1/system/public-config`
+- everything under `/dex/`
+
+Every other route requires a verifiable bearer token in the `Authorization` header. The middleware also accepts the token in the `?access_token=` query parameter for clients that cannot set request headers, such as browser `EventSource` connections.
+
+## Where to go next
+
+- [Built-in admin account](/docs/operations/authentication/admin-account) for bootstrap and emergency access.
+- [OpenID Connect](/docs/operations/authentication/oidc) for production user authentication.
+- [Dex](/docs/operations/authentication/dex) when your identity provider lacks PKCE support.
+- [Security and RBAC](/docs/operations/security) for the isolation model and pod-level permissions.

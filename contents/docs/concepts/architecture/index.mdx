@@ -1,0 +1,64 @@
+---
+title: Architecture
+description: How the Magos controllers reconcile Terraform inside Kubernetes, and what runs where.
+---
+
+Magos is a fleet of small, single-purpose controllers that share one cluster and one set of [custom resources](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/). None of them runs Terraform directly. Instead, the controllers reconcile their respective resources by creating short-lived Kubernetes [Jobs](https://kubernetes.io/docs/concepts/workloads/controllers/job/) that do the actual work in isolated pods.
+
+This page covers the controller responsibilities, the runner pod model, and the path a single change takes from `kubectl apply` to applied Terraform.
+
+## The controllers
+
+The chart ships five controllers, each in its own Deployment:
+
+- **Workspace controller.** Reconciles `Workspace` resources. For each Workspace it manages a per-Workspace [PersistentVolumeClaim](https://kubernetes.io/docs/concepts/storage/persistent-volumes/) and creates Plan and Apply Job resources whose pods run the `magos-job` image. It never runs `terraform` itself.
+- **Project controller.** Reconciles `Project` resources. Its job is to grant or revoke execution permission to member Workspaces. When no `Rollout` of the same name exists, it grants every member Workspace permission to run in parallel; when one does, it defers to the Rollout controller.
+- **Rollout controller.** Reconciles `Rollout` resources. It walks an ordered list of [label selectors](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/) and grants execution permission to one cohort of Workspaces at a time.
+- **VariableSet controller.** Reconciles `VariableSet` resources. It validates that every referenced [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) or [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/) key exists and reports a clean status; it never copies the resolved values into the CR or into its own logs.
+- **RefWatcher controller.** Polls remote Git references for Workspaces whose `targetRevision` is a branch or tag, and writes the resolved commit SHA back as an annotation when it moves. This is what lets a `targetRevision: main` Workspace reconcile to the actual SHA without operator intervention.
+
+The five controllers do not talk to each other directly. They watch the same set of Kubernetes resources and react independently when those resources change.
+
+## The runner pod model
+
+Every plan and every apply runs in its own Kubernetes [Pod](https://kubernetes.io/docs/concepts/workloads/pods/). The flow is:
+
+1. The workspace controller composes a Job spec for the current phase (plan or apply).
+2. The Job runs the `magos-job` image. The Pod mounts a per-Workspace PersistentVolumeClaim at `/workspace-data`, so the binary plan file produced during the plan phase is visible to the subsequent apply phase.
+3. Inside the Pod, the `magos-job` binary clones the Git source with a shallow clone, downloads the requested Terraform version, runs `terraform init` and the appropriate phase, and exits.
+4. The Pod is torn down. If the Workspace is deleted, the Job and the PVC are garbage-collected via [owner references](https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/).
+
+Three properties fall out of this:
+
+- **Isolation.** Each Workspace gets its own PVC. Two Workspaces never see each other's plan files, credentials, or Terraform providers.
+- **No long-lived shell.** A run that hangs, leaks a credential into an env var, or downloads a malicious provider only lives for the duration of one Pod. There is no shared executor accumulating state.
+- **Cluster-bounded throughput.** Apply concurrency is bounded by the cluster's scheduler and your Job quota, not by a runner pool you size yourself.
+
+## How a change flows through the system
+
+Consider a single Workspace that points at a branch in a Git repository. A typical end-to-end cycle looks like this:
+
+1. **A new commit lands on the branch.** The RefWatcher controller polls the remote ref on its configured interval and notices the new SHA. It writes that SHA to the Workspace as the `magosproject.io/detected-revision` annotation.
+2. **The workspace controller observes the annotation.** It treats the change as a fresh run trigger, assigns a new run ID to track it, transitions the Workspace to `Pending`, and clears the execution permission it currently holds (if any).
+3. **The orchestrator grants execution.** If no `Rollout` exists, the Project controller adds the `magosproject.io/execution-allowed=true` annotation to every member Workspace at once. If a `Rollout` exists, the Rollout controller adds the annotation only when this Workspace is part of the currently active step.
+4. **The workspace controller creates the Plan Job.** The Job's Pod clones the repo at the detected SHA, runs `terraform init`, then `terraform plan -out=run.tfplan`. The plan file lands on the per-Workspace PVC. The Workspace status moves to `Planning`, then `Planned` on success.
+5. **Policy validation runs (optional).** Magos adopts [Kyverno](https://kyverno.io) `ValidatingPolicy` resources for policy-as-code on plans. When the Workspace's effective `validation.policySelector` is non-empty, the plan Pod also exports the plan to JSON and evaluates it against matching `ValidatingPolicy` resources via the embedded Kyverno CLI. A violation moves the Workspace to `ValidationFailed` and the apply phase is skipped.
+6. **The workspace controller creates the Apply Job.** When `autoApply` is `true` (default) and the plan was clean, the controller spawns the Apply Job. Its Pod mounts the same PVC, finds the plan file the previous Job wrote, and runs `terraform apply run.tfplan`. The Workspace status moves to `Applying`, then `Applied`.
+7. **Run history is recorded.** As each phase completes, the workspace controller writes structured run summaries to PostgreSQL and archives the gzipped pod logs to the configured S3-compatible bucket. Both are surfaced through the API server and the UI.
+
+## Storage components
+
+Two stateful components ship with the chart:
+
+- **PostgreSQL** stores run history (which run, which phase, which result, when, by whom) so the UI can query it without scanning Kubernetes events.
+- **An S3-compatible object store** (RustFS by default) holds the gzipped logs of every plan and apply Pod, indexed by run ID and phase.
+
+The bundled instances are convenient for development and demo clusters. Production installs typically point Magos at managed Postgres and an existing object store (S3, GCS, MinIO) through chart values; the controllers do not care which implementation, only that the protocol matches.
+
+## What is intentionally out of scope
+
+A few things you might expect that Magos deliberately leaves out:
+
+- **No Terraform state backend.** State lives wherever the module's `backend` block puts it. Magos does not store, lock, or proxy state, and does not prescribe a backend; every Workspace brings its own.
+- **No controller-side variable propagation.** The controller validates that referenced Secrets and ConfigMaps exist, but never copies their values into the Workspace CR, its status, or its logs. Pods receive them through `SecretKeySelector` references injected by the kubelet at pod start.
+- **No cross-Workspace dependency graph.** Workspaces are independent on purpose. If you need promotion ordering across environments, use a `Rollout`. We highly discourage reaching across Workspaces with Terraform's `remote_state`: a Terraform configuration should be cohesive, so everything that belongs together stays together inside the same module and the same Workspace.

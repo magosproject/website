@@ -1,0 +1,274 @@
+---
+title: Dex identity bridge
+description: Enable Dex when your identity provider does not support public-client PKCE.
+---
+
+Magos talks to identity providers using the OAuth 2.0 Authorization Code flow with PKCE on a public client. Identity providers that cannot do that, either because they require a confidential client with a shared secret, because they only speak SAML, or because they only speak LDAP, need a bridge. [Dex](https://dexidp.io/) is that bridge. When enabled in chart values, Magos deploys Dex inside the release namespace and routes the OIDC flow through it: the UI talks to Dex with public-client PKCE, and Dex talks to the upstream IdP with whatever protocol the upstream needs.
+
+If your IdP supports public OIDC clients with PKCE (Okta, Auth0, Google, recent Keycloak releases, recent Microsoft Entra ID configurations), you do not need Dex. Skip this page and follow [OpenID Connect (OIDC)](/docs/operations/authentication/oidc).
+
+## When to use Dex
+
+Enable Dex when at least one of the following is true:
+
+- The upstream IdP is **LDAP** or Active Directory.
+- The upstream IdP is **SAML 2.0** only.
+- The upstream IdP is **GitHub**, **GitLab**, **Bitbucket**, or a similar source that only supports confidential OAuth clients.
+- The upstream IdP issues ID tokens that lack the claims you need (Dex can rewrite or augment claims through its connector configuration).
+
+Dex adds a process to operate and an extra Pod's worth of latency to the login path. If your IdP can do PKCE directly, prefer that.
+
+## What the chart deploys
+
+Setting `api.oidc.dex.enabled: true` in chart values causes the chart to render and apply:
+
+- A `Deployment` running the Dex image (`api.oidc.dex.image.{repository,tag,pullPolicy,pullSecrets}` controls the image).
+- A `Service` on port `5556` (the Dex gRPC/HTTPS port).
+- A `ServiceAccount` for the Dex Pod.
+- A `Secret` containing the rendered Dex configuration, including the connector list.
+- A cert-manager `Issuer` (self-signed) and `Certificate` that issues the TLS cert Dex serves on port `5556`. The certificate is mounted into the Dex Pod and trusted by the API server.
+
+The chart also rewires the API server. When Dex is enabled:
+
+- `OIDC_ISSUER_URL` on the API server is set to `<api-base-url>/dex`, overriding any `api.oidc.issuerURL` you set.
+- The API server's `/dex/` path is wired to a reverse proxy that forwards to the Dex Service on `5556`. The proxy rewrites Dex's `/.well-known/openid-configuration` response so that the JWKS URL and the authorization/token endpoints point at `<api-base-url>/dex/...` instead of the in-cluster Service DNS. Browsers always see public URLs; the cluster-internal addresses never leak.
+
+The net effect is that the rest of the OIDC flow continues to work exactly as described in [OpenID Connect (OIDC)](/docs/operations/authentication/oidc). The only difference is that the issuer your IdP is configured for is Magos's `/dex` path, not the upstream IdP.
+
+## Connector configuration
+
+Dex calls its upstream IdP integrations **connectors**. Configure them through `api.oidc.dex.connectors`. The chart renders this list verbatim into Dex's config, so the field names and types match the upstream [Dex connector reference](https://dexidp.io/docs/connectors/).
+
+### GitHub
+
+```yaml
+api:
+  oidc:
+    enabled: true
+    clientID: "magos"
+    cliClientID: "magos-cli"
+    usernameClaim: email
+    admins:
+      claims:
+        groups:
+          - acme:platform-eng
+    dex:
+      enabled: true
+      connectors:
+        - type: github
+          id: github
+          name: GitHub
+          config:
+            clientID: "Iv1.abcdef1234567890"
+            clientSecret: "$CLIENT_SECRET"
+            redirectURI: "https://magos.example.com/dex/callback"
+            orgs:
+              - name: acme
+                teams:
+                  - platform-eng
+                  - sre
+            loadAllGroups: true
+      envFrom:
+        - secretRef:
+            name: magos-dex-github
+```
+
+The `groups` claim Dex emits for GitHub is `<org>:<team>`, which is why the admin mapping above is `acme:platform-eng`.
+
+### GitLab
+
+```yaml
+api:
+  oidc:
+    dex:
+      connectors:
+        - type: gitlab
+          id: gitlab
+          name: GitLab
+          config:
+            baseURL: "https://gitlab.example.com"
+            clientID: "abcdef..."
+            clientSecret: "$CLIENT_SECRET"
+            redirectURI: "https://magos.example.com/dex/callback"
+            groups:
+              - infra/platform-eng
+              - infra/sre
+```
+
+### Microsoft Entra ID
+
+```yaml
+api:
+  oidc:
+    dex:
+      connectors:
+        - type: microsoft
+          id: microsoft
+          name: Microsoft Entra ID
+          config:
+            clientID: "00000000-0000-0000-0000-000000000000"
+            clientSecret: "$CLIENT_SECRET"
+            redirectURI: "https://magos.example.com/dex/callback"
+            tenant: "11111111-1111-1111-1111-111111111111"
+            groups:
+              - platform-eng
+              - sre
+```
+
+### Google
+
+```yaml
+api:
+  oidc:
+    dex:
+      connectors:
+        - type: google
+          id: google
+          name: Google Workspace
+          config:
+            clientID: "1234567890-abcdef.apps.googleusercontent.com"
+            clientSecret: "$CLIENT_SECRET"
+            redirectURI: "https://magos.example.com/dex/callback"
+            hostedDomains:
+              - example.com
+            groups:
+              - platform-eng@example.com
+              - sre@example.com
+            serviceAccountFilePath: /etc/dex/google/sa.json
+            adminEmail: "directory-readonly@example.com"
+```
+
+The Google connector needs a service account JSON to read group memberships from the Workspace Admin SDK. Mount it via the standard Dex Pod customisation route (the chart does not template this directly; use `api.oidc.dex.env`/`envFrom` together with a separate Secret and rely on the projected Service Account or a separate Secret mount that you manage).
+
+### LDAP
+
+```yaml
+api:
+  oidc:
+    dex:
+      connectors:
+        - type: ldap
+          id: ldap
+          name: Corporate LDAP
+          config:
+            host: ldap.example.com:636
+            bindDN: "uid=dex-readonly,ou=services,dc=example,dc=com"
+            bindPW: "$LDAP_BIND_PW"
+            userSearch:
+              baseDN: "ou=people,dc=example,dc=com"
+              filter: "(objectClass=person)"
+              username: uid
+              idAttr: uid
+              emailAttr: mail
+              nameAttr: cn
+            groupSearch:
+              baseDN: "ou=groups,dc=example,dc=com"
+              filter: "(objectClass=groupOfNames)"
+              userMatchers:
+                - userAttr: DN
+                  groupAttr: member
+              nameAttr: cn
+```
+
+LDAP is the canonical case where Dex earns its keep: no upstream OIDC at all, but Magos still sees standard `groups` claims on the resulting ID tokens.
+
+## Wiring secrets through env
+
+The Dex configuration the chart renders is a Kubernetes Secret, but you do not want your connector client secrets sitting inside the values file. Dex resolves `$VAR` references in its config from the Pod's environment, so the pattern is:
+
+1. Store the upstream IdP's client secret (or LDAP bind password, or whatever) in a Secret managed by your existing Secret pipeline.
+2. Reference that Secret through `api.oidc.dex.env` or `api.oidc.dex.envFrom`. Both fields are written verbatim onto the Dex container spec.
+3. Reference the resulting environment variable from the connector config with `$VAR_NAME`.
+
+The GitHub example above does exactly that: `clientSecret: "$CLIENT_SECRET"` in the connector config, and `envFrom.secretRef.name: magos-dex-github` to surface `CLIENT_SECRET` as an environment variable. The Secret itself looks like:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: magos-dex-github
+  namespace: magos
+type: Opaque
+stringData:
+  CLIENT_SECRET: "abcdef0123456789..."
+```
+
+This pattern keeps secrets out of the values file and lets you rotate them by updating the Secret and restarting the Dex Pod.
+
+## IdP redirect URI
+
+Every connector configuration has a `redirectURI` field. Set it to `<api-base-url>/dex/callback`. That is the URL Dex serves through the API server's reverse proxy; the upstream IdP never talks to the cluster-internal Dex Service directly.
+
+Concretely, if the API server is reachable at `https://magos.example.com`, the redirect URI to register with every upstream IdP is `https://magos.example.com/dex/callback`. The IdPs that need confidential clients (GitHub, GitLab, Microsoft) also need that URL allow-listed in their OAuth client configuration.
+
+## Approval screen
+
+By default Dex prompts the user to approve the requested scopes on first login. For an internal platform tool this prompt is noise. The chart sets `api.oidc.dex.skipApprovalScreen: true` by default to suppress it.
+
+If you operate under a policy that requires explicit user consent to scope grants, set:
+
+```yaml
+api:
+  oidc:
+    dex:
+      skipApprovalScreen: false
+```
+
+## Logging
+
+Dex's log verbosity and format are configurable:
+
+```yaml
+api:
+  oidc:
+    dex:
+      logLevel: INFO
+      logFormat: TEXT
+```
+
+Defaults are `INFO` and `TEXT`. Set `logLevel: DEBUG` when troubleshooting a connector. Set `logFormat: JSON` when shipping the logs to a structured log platform.
+
+## Troubleshooting
+
+The login flow has three hops (browser, Dex, upstream IdP), and the failure modes typically point at one of them. A short triage routine:
+
+**Read the Dex Pod logs.**
+
+```sh
+kubectl logs -n magos -l app.kubernetes.io/name=dex --tail=200
+```
+
+Connector misconfiguration (wrong client ID, wrong redirect URI, bad LDAP bind) shows up here as an explicit error before the user ever sees a Magos screen.
+
+**Inspect the public discovery document.**
+
+```sh
+curl -sf https://magos.example.com/dex/.well-known/openid-configuration | jq .
+```
+
+The `issuer` field must equal `https://magos.example.com/dex`, and the `jwks_uri`, `authorization_endpoint`, and `token_endpoint` fields must all sit under `https://magos.example.com/dex/`. If you see internal cluster DNS in any of them, the API server's proxy rewrite is misconfigured; restart the API server and verify `OIDC_ISSUER_URL` is set to `<api-base-url>/dex`.
+
+**Confirm the JWKS is reachable.**
+
+```sh
+curl -sf https://magos.example.com/dex/keys | jq '.keys | length'
+```
+
+A non-zero number means Dex is up and the proxy is rewriting URLs correctly. An empty response or a 502 means the API server cannot reach the Dex Service on port `5556`. Check the cert-manager `Certificate` (`kubectl get certificate -n magos`) and the Dex Pod readiness probe.
+
+**Verify the ID token claims.**
+
+After a successful login, decode the ID token the UI received (browser dev tools, `Application` tab, look for the token storage). The `iss` claim must be the Magos `/dex` URL, the `aud` claim must match `api.oidc.clientID`, and the claims you mapped in `api.oidc.<role>.claims` must be present with the values you expect. If claims are missing, the corresponding connector is not emitting them; check the connector's `groups`/`emailAttr`/equivalent config.
+
+## cert-manager dependency
+
+Dex serves its endpoints over TLS, and the certificate is provisioned through cert-manager. When `api.oidc.dex.enabled: true`, the chart installs:
+
+- A `cert-manager.io/v1` `Issuer` of type `selfSigned` in the release namespace.
+- A `cert-manager.io/v1` `Certificate` issued by that Issuer, with the Dex Service DNS name in its SANs.
+
+The result is a self-signed certificate trusted only by the API server's reverse proxy. External clients never see it directly; they see the API server's own ingress certificate.
+
+For this to work, cert-manager must already be installed in the cluster when you set `dex.enabled: true`. The chart does not bundle cert-manager. Install it through the upstream chart, then enable Dex in Magos values. If cert-manager is not present, the `Certificate` resource will sit `Pending` and the Dex Pod will never become ready.
+
+If your cluster uses a different certificate provisioner, override the Issuer and Certificate by managing them yourself outside the chart and pointing Dex at the resulting Secret. That path is supported but unsupported in the sense that you are now responsible for the lifecycle of the cert; the chart's defaults are the recommended setup.

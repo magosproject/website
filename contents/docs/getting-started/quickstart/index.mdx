@@ -1,0 +1,121 @@
+---
+title: Quickstart
+description: Create a Project and a Workspace, then watch Magos drive a Terraform module to applied state.
+---
+
+This tutorial walks through the smallest complete Magos workflow: create a `Project`, create a `Workspace` that points at a Terraform module, and watch the controllers reconcile that workspace to applied state.
+
+You should already have Magos [installed](/docs/getting-started/installation) in a Kubernetes cluster you can reach with `kubectl`. The walkthrough deliberately avoids `Rollout` so you can see the per-Workspace lifecycle without orchestration layered on top.
+
+## Step 1: Create a Project
+
+A `Project` is a logical boundary that groups Workspaces and supplies shared inputs. It does not execute anything itself. Create `project.yaml`:
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Project
+metadata:
+  name: data-platform
+  namespace: default
+spec:
+  description: Infrastructure for the data engineering team
+```
+
+Apply it:
+
+```plaintext
+kubectl apply -f project.yaml
+```
+
+Confirm the Project reaches `Ready`:
+
+```plaintext
+kubectl get project data-platform
+```
+
+With no `Rollout` of the same name in the namespace, the Project controller falls back to `DefaultParallel` mode: any Workspace pointing at this Project will be granted execution permission automatically.
+
+## Step 2: Create a Workspace
+
+A `Workspace` declares where the Terraform module lives, which revision to reconcile, and which Terraform version to run. Create `workspace.yaml`:
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Workspace
+metadata:
+  name: vpc-dev
+  namespace: default
+  labels:
+    env: dev
+spec:
+  projectRef:
+    name: data-platform
+  source:
+    repoURL: https://github.com/magosproject/demo.git
+    targetRevision: main
+    path: .
+  terraform:
+    version: "1.14.8"
+```
+
+What the fields do:
+
+- `projectRef.name` binds the Workspace to the `data-platform` Project.
+- `source` describes the Git module: the repository URL, the branch or tag or commit to check out, and the path inside the repository to run `terraform` against.
+- `terraform.version` selects which Terraform binary the runner pod will install.
+
+Apply it:
+
+```plaintext
+kubectl apply -f workspace.yaml
+```
+
+## Step 3: Watch the reconciliation
+
+Magos surfaces progress through Kubernetes-native status. Tail the Workspace:
+
+```plaintext
+kubectl get workspace vpc-dev -w
+```
+
+You will see the `PHASE` field progress through the normal lifecycle:
+
+- `Pending`: waiting on orchestration to grant execution permission.
+- `Planning`: a plan [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/) has been created and is running `terraform plan`.
+- `Planned`: the plan succeeded; awaiting apply (or auto-applying, see below).
+- `Applying`: an apply Job has been created and is running `terraform apply`.
+- `Applied`: the run completed successfully.
+
+By default `spec.autoApply` is `true`, so the Workspace transitions from `Planned` straight into `Applying`. To require a manual approval between plan and apply, set `autoApply: false` and watch the Workspace pause at `Planned` until you approve it.
+
+## Step 4: Inspect what ran
+
+Inspect the full status:
+
+```plaintext
+kubectl get workspace vpc-dev -o yaml
+```
+
+The useful fields:
+
+- `status.observedRevision` is the exact Git SHA Magos reconciled. When `targetRevision` is a branch, this is the resolved commit, not the branch name. That is what you want for auditability.
+- `status.currentRunID` and `status.lastRunStartedAt` describe the run currently in flight or the most recent terminal run.
+- `status.conditions` includes a standard `Ready` condition. The CamelCase `reason` is what you key off in alerts.
+
+The Plan and Apply Jobs themselves are owned by the Workspace:
+
+```plaintext
+kubectl get jobs -l magosproject.io/workspace=vpc-dev
+```
+
+When the Workspace is deleted, the Jobs and their [PersistentVolumeClaim](https://kubernetes.io/docs/concepts/storage/persistent-volumes/) are garbage-collected with it.
+
+## What you built
+
+You declared infrastructure desired state in two Kubernetes resources, and a Kubernetes controller drove that state into reality. There is no CI pipeline, no shared runner, and no script that runs `terraform apply` outside the cluster.
+
+From here, you have three natural next steps:
+
+- Read about [Architecture](/docs/concepts/architecture) for a tour of the controller fleet and the isolation model.
+- Read about [Rollouts](/docs/concepts/rollouts), a mechanism to execute Workspaces in a particular order, sequential, parallel, or layered.
+- Read about [Variable Sets](/docs/concepts/variable-sets) to wire Kubernetes [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) into Terraform inputs.

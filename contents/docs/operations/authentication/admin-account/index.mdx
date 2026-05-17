@@ -1,0 +1,249 @@
+---
+title: Built-in admin account
+description: The lone built-in user, suitable as a bootstrap account and disabled once an identity provider is configured.
+---
+
+Magos does not maintain a user directory. The only built-in principal is the admin account, and it exists solely to bootstrap a fresh install: log in once, point Magos at your identity provider, then disable the admin account. After that point every interactive user authenticates through OIDC and every machine client authenticates with a Kubernetes ServiceAccount token.
+
+The API server's authentication middleware recognises three principal types, dispatched on the JWT `iss` claim:
+
+1. **Admin.** JWT signed by the API server itself using HMAC-SHA256. Issuer is the API server's own URL. Bypasses every authorisation check.
+2. **OIDC user.** JWT issued by an external identity provider. Verified against the IdP's JWKS. Claims are mapped to Kubernetes ServiceAccounts and every request goes through `SubjectAccessReview`.
+3. **Kubernetes ServiceAccount.** Bearer token verified by `TokenReview` against the Kubernetes API. Used by the workspace controller's `/internal/*` calls and by any client that already has a kubeconfig.
+
+This page covers only the first type. See [OpenID Connect (OIDC)](/docs/operations/authentication/oidc) for the second.
+
+> The admin account is the platform installer's foothold, not a long-lived identity. Treat it the way you would treat the initial password on a freshly imaged appliance: use it to wire up real authentication, then turn it off.
+
+The admin account bypasses Kubernetes RBAC entirely. The API server's middleware recognises the admin JWT by its issuer claim and skips the SubjectAccessReview that every other principal goes through. There is no scope on what an admin can do inside Magos, which is precisely why operating Magos in production with the admin account left enabled is not the supported posture.
+
+## Enabling the account
+
+Admin auth is on by default. The relevant chart values:
+
+```yaml
+api:
+  adminAccount:
+    enabled: true
+    passwordHash: ""
+    tokenSigningKey: ""
+    tokenTTL: 24h
+  secret:
+    name: ""
+```
+
+What each value does:
+
+- `api.adminAccount.enabled` (default `true`). When `false`, the `POST /api/v1alpha1/auth/login` endpoint returns `403` and no admin JWT is accepted, even one minted earlier. Disable this once OIDC is set up.
+- `api.adminAccount.passwordHash`. A bcrypt hash of the admin password. Empty means the chart generates one for you on first install and persists it across upgrades via `helm lookup`. Both `$2a$` and `$2y$` prefixes are accepted by the chart, but see the note on the password recipe below.
+- `api.adminAccount.tokenSigningKey`. The HMAC-SHA256 secret used to sign admin JWTs. Empty means the chart generates a random key on first install and reuses it across upgrades. Rotating this key invalidates every outstanding admin token immediately.
+- `api.adminAccount.tokenTTL` (default `24h`). Lifetime of a freshly issued admin token. There is no refresh flow. When the token expires, the user logs in again.
+- `api.secret.name`. If set, the chart does not generate its own Secret and instead reads the admin credentials, signing key, and other API server settings from the Secret you name. Use this when you manage Secrets with External Secrets Operator, Sealed Secrets, or similar.
+
+The generated or supplied values land in the `<release>-api` Secret under `ADMIN_ACCOUNT_PASSWORD_HASH` and `ADMIN_ACCOUNT_TOKEN_SIGNING_KEY`. The API server reads them on start.
+
+### How the values land in the cluster
+
+The chart renders these values into the API server's environment via a single Secret. After install, you can see the resulting state with:
+
+```sh
+kubectl get secret -n <release-namespace> <fullname>-api -o yaml
+```
+
+The relevant keys are `ADMIN_ACCOUNT_ENABLED`, `ADMIN_ACCOUNT_PASSWORD_HASH`, `ADMIN_ACCOUNT_TOKEN_SIGNING_KEY`, and `ADMIN_ACCOUNT_TOKEN_TTL`. They are read by the API server at start; changing them requires a Deployment restart, not just a `helm upgrade`. The chart triggers that restart automatically by hashing the Secret contents into a Pod annotation.
+
+When `api.secret.name` is set, the chart does not render any of these keys itself. The Secret you provide must already contain all four. This is the path most production installs take, because it keeps both the password hash and the signing key out of the values file and inside whatever Secret pipeline you already operate.
+
+## Setting a known password
+
+Most operators want a password they chose, not one the chart picked. Generate a bcrypt hash with `htpasswd`:
+
+```sh
+htpasswd -bnBC 10 "" YOUR_PASSWORD | tr -d ':\n' | sed 's/$2y/$2a/'
+```
+
+A few things about that one-liner:
+
+- `-B` selects bcrypt; `-C 10` is the work factor (cost) and `10` is a reasonable production default.
+- The trailing `tr` strips the leading colon and newline `htpasswd` emits when invoked with an empty username.
+- `sed 's/$2y/$2a/'` rewrites the OpenBSD-style prefix to the standard one. The chart accepts both, but the API server's bcrypt comparison expects `$2a$`. Without the rewrite the login endpoint will reject the password silently with a `403`.
+
+Drop the resulting hash into your values file:
+
+```yaml
+api:
+  adminAccount:
+    passwordHash: "$2a$10$..."
+```
+
+If you keep secrets out of values files, point the chart at an existing Secret through `api.secret.name` and set `ADMIN_ACCOUNT_PASSWORD_HASH` there directly.
+
+## Letting the chart generate a password
+
+If you leave `passwordHash` empty on a fresh install, the chart's `_helpers.tpl` generates a random bcrypt hash and writes it into the API server Secret. On subsequent upgrades the chart performs `helm lookup` on that Secret and reuses the existing hash, so the password is stable across `helm upgrade` runs.
+
+After `helm install` finishes, the chart's `NOTES.txt` prints the command to read the stored hash:
+
+```sh
+kubectl get secret -n <release-namespace> <fullname>-api \
+  -o jsonpath='{.data.ADMIN_ACCOUNT_PASSWORD_HASH}' | base64 -d
+```
+
+That returns the bcrypt hash, not the plaintext. The plaintext password is not stored anywhere and cannot be recovered. If you want a memorable password, generate one yourself with the `htpasswd` recipe and set `api.adminAccount.passwordHash`. If you forget the generated password, set a new `passwordHash` and run `helm upgrade`.
+
+## Disabling the account
+
+Once OIDC is configured and a real platform-eng group can log in as admin, turn the built-in account off:
+
+```yaml
+api:
+  adminAccount:
+    enabled: false
+```
+
+The login endpoint returns `403` for every credential attempt the moment this rolls out. Existing admin sessions continue to work until the underlying JWT expires (the default `24h` ceiling), at which point the user is redirected to the login page and must authenticate through OIDC. There is no admin-session revocation list; the only kill switch for in-flight tokens is rotating `api.adminAccount.tokenSigningKey`.
+
+A practical sequence:
+
+1. Install Magos with the admin account enabled.
+2. Configure OIDC; verify a member of the `platform-eng` group can log in and is mapped to the `magos-admin` ServiceAccount.
+3. Set `api.adminAccount.enabled: false` and run `helm upgrade`.
+4. Optional: rotate `api.adminAccount.tokenSigningKey` to a fresh value to invalidate any admin token that was minted earlier in the day.
+
+## Token lifetime and rotation
+
+Admin tokens are minted by the API server itself, signed with HMAC-SHA256 using `api.adminAccount.tokenSigningKey`. The `iss` claim carries the API server's own URL so the middleware can recognise it as an admin token and short-circuit the OIDC verification path.
+
+A few constraints worth pinning down:
+
+- TTL is `api.adminAccount.tokenTTL`, default `24h`. When a token expires the UI redirects to the login page.
+- There is no refresh-token flow. Long-running automation that needs to call the API as admin should not use this account; use a Kubernetes ServiceAccount token instead.
+- Rotating the signing key (any change to `api.adminAccount.tokenSigningKey`) is the only way to invalidate live admin tokens before their TTL. The next API server restart picks up the new key and every previously minted admin JWT fails signature verification immediately.
+
+A typical signing-key rotation looks like this:
+
+```yaml
+api:
+  adminAccount:
+    tokenSigningKey: "new-random-64-byte-string"
+```
+
+Run `helm upgrade` and wait for the API server Pod to roll. Every admin session in flight is now invalid. The next login mints fresh tokens signed with the new key. If you keep secrets out of values files, write the new key into the API server Secret under `ADMIN_ACCOUNT_TOKEN_SIGNING_KEY` and restart the API server Deployment by patching its annotations.
+
+The chart generates a 64-character random string for `tokenSigningKey` when the value is empty on a fresh install. There is no rotation cadence the chart enforces; rotate on a schedule that matches your other shared-secret rotation policies.
+
+## Submitting tokens
+
+Once the admin token is minted, the API server accepts it through either of two transports on every authenticated route:
+
+- `Authorization: Bearer <token>` header, used by the UI's API calls and by every command-line client.
+- `?access_token=<token>` query parameter, used only by the run-log SSE endpoint. Browsers cannot set custom headers on `EventSource` connections, so SSE clients fall back to the query parameter.
+
+Both transports go through the same middleware. The query-parameter path does not relax any verification; it is purely a transport accommodation. If you proxy Magos behind something that logs query strings, prefer the header transport for any tooling you control and accept that the SSE endpoint will appear in proxy logs with the token in the URL. The simpler fix is to strip `access_token` from access logs on the proxy.
+
+A handful of routes accept requests with no token at all: `GET /healthz`, `GET /readyz`, `GET /openapi.json`, `GET /docs`, `POST /api/v1alpha1/auth/login`, `GET /api/v1alpha1/system/public-config`, and anything under `/dex/`. Those are unauthenticated by design. Everything else returns `401` without a valid token.
+
+## Calling the API as admin
+
+For day-to-day API use, mint a token through the login endpoint and reuse it until it expires:
+
+```sh
+TOKEN=$(curl -sf -X POST https://magos.example.com/api/v1alpha1/auth/login \
+  -H "Authorization: Bearer YOUR_PASSWORD" \
+  | jq -r .idToken)
+
+curl -sf https://magos.example.com/apis/magosproject.io/v1alpha1/projects \
+  -H "Authorization: Bearer $TOKEN" | jq .
+```
+
+The password is sent in the `Authorization` header so it never lands in a request body or query string. The endpoint returns `{"idToken": "<jwt>"}` on success. If the password is wrong the endpoint returns `403`; if the admin account is disabled (`api.adminAccount.enabled: false`), the endpoint also returns `403`. The status code is the same in both cases; the response body's error message is the only place the distinction is surfaced.
+
+For long-running scripts, prefer a Kubernetes ServiceAccount token over the admin account: it can be scoped to specific verbs through standard RBAC, it does not require sharing a password, and rotating it does not affect interactive admin logins.
+
+## Security notes
+
+The admin path is deliberately narrow. A few properties that follow from the implementation:
+
+- HS256 with a server-held key. The signing key never leaves the API server Secret. Magos does not publish a JWKS for admin tokens because there is no public verifier; only the API server itself verifies them.
+- Admin tokens bypass `SubjectAccessReview` entirely. The middleware checks the signature, checks the TTL, and that is the gate. There is no per-resource authorisation step for admin requests.
+- Admin tokens are transferable. Anyone holding the bearer string is admin until it expires. Do not share the password, do not ship the resulting token to a shared system, and do not paste it into a chat client.
+- The admin account exists alongside OIDC. Enabling OIDC does not implicitly disable the admin account, and disabling the admin account does not affect OIDC users. Treat them as independent switches.
+
+If you operate under a policy that requires every action to be attributed to a real human identity, keep the admin account disabled in production and use a break-glass SOP that re-enables it (set `enabled: true`, set a known `passwordHash`, run `helm upgrade`) only when OIDC is unavailable. That sequence is auditable through the Kubernetes audit log on the Secret and on the Helm release.
+
+## What the token looks like
+
+For debugging it can help to know what the API server's admin tokens contain. Decode any admin JWT (the UI stores it in `localStorage` under a Magos-prefixed key, or you can grab one from the `Set-Cookie` header on `POST /api/v1alpha1/auth/login`) and you get a payload like:
+
+```json
+{
+  "iss": "https://magos.example.com",
+  "sub": "admin",
+  "iat": 1715000000,
+  "exp": 1715086400
+}
+```
+
+There are no group claims, no resource claims, and no role claims. The presence of the admin `iss` is what tells the middleware to skip every other check. That also means there is no way to scope an admin token down further; if you need a narrower identity, use OIDC and bind a ClusterRole that grants only what you need.
+
+## Local development
+
+`hack/local-values.yaml` ships with `api.adminAccount.enabled: true` and a known bcrypt hash so the password `admin` works in `make run`. That is the only place the admin account is meaningful by default: the local development cluster has no IdP and no Dex, so admin is the only principal type available. The shipped hash is for the password `admin` and only the password `admin`; do not copy that hash into a production values file.
+
+For local iteration the `tokenTTL` is left at `24h`, which is normally longer than a development session needs. Shorten it to `1h` if you want to validate the re-login path frequently. Lengthening it past `24h` is supported but not useful; the UI does not currently warn before expiry, so a long token simply postpones the redirect.
+
+When you exit `make run` and restart it, the API server generates a fresh signing key in memory because the local install does not persist one. Every previously minted admin token is invalidated. This is the right default for development, since it means stopping `make run` is a clean reset, but it differs from a cluster install where the signing key survives Pod restarts as long as the Secret survives.
+
+In tests that exercise the admin login path, generate a hash with the recipe at the top of this page and write it into the test values overlay rather than depending on the shipped local hash. That way the test stays correct if the local-values default is ever changed.
+
+The chainsaw integration suite assumes a known admin password for the same reason: it controls the credentials it tests against, instead of probing for whatever the chart happened to generate on this run.
+
+## Troubleshooting login
+
+A short list of the failure modes we see most often, and what to look for:
+
+**`403` on every login attempt, including a known-good password.**
+
+Either the admin account is disabled (`api.adminAccount.enabled: false`) or the bcrypt hash uses a `$2y$` prefix that was not rewritten to `$2a$`. Check the rendered Secret:
+
+```sh
+kubectl get secret -n <release-namespace> <fullname>-api \
+  -o jsonpath='{.data.ADMIN_ACCOUNT_PASSWORD_HASH}' | base64 -d
+```
+
+If the hash starts with `$2y$`, regenerate it with the `sed` step in the recipe above and `helm upgrade`.
+
+**Login succeeds, then every subsequent request returns `401`.**
+
+The signing key changed between the login response and the subsequent request, usually because the API server Pod restarted with a freshly generated key. Confirm the signing key is set explicitly in values (or in the Secret you supply through `api.secret.name`) rather than left empty. Empty signing keys are stable across `helm upgrade` only when the chart can `lookup` an existing Secret; replacing the Secret resets them.
+
+**Login succeeds in one replica and fails in another.**
+
+The API server is running with `replicas > 1` and each replica generated its own signing key because none was supplied. Set `api.adminAccount.tokenSigningKey` to a fixed value (or supply one through `api.secret.name`) so every replica uses the same key.
+
+## Audit
+
+The admin account is a single shared principal. Every action taken through it appears in audit surfaces as `admin`, not as the human who typed the password. The audit trails worth knowing about:
+
+- **Kubernetes audit log.** Magos CRD changes (Projects, Workspaces, Rollouts, VariableSets) are written by the API server's ServiceAccount, not by the admin user. The audit log records the API server's identity, not the operator's. To attribute changes to humans, use the Magos run history (every plan and apply records the principal who initiated it) or rely on the upstream Git provider's audit log for commit attribution.
+- **Magos run history.** When an admin triggers a run, the principal is recorded as `admin` in the run row in PostgreSQL. That is sufficient for "an admin did this" but not for "which admin"; with the admin account in production you cannot distinguish operators.
+- **Helm release history.** Changes to the API server Secret (including signing-key rotations) show up in the cluster's audit log if `Secret` modifications are recorded. The Helm release itself records each upgrade.
+
+These limitations are intrinsic to a shared admin account. The fix is the disable-after-OIDC sequence at the top of this page: once OIDC is the only login surface, every action attributes to a specific user.
+
+## Recovering from a forgotten password
+
+If the admin password is lost and `api.adminAccount.enabled` is still `true`, the recovery path is to set a new `passwordHash` and roll the API server:
+
+1. Generate a fresh hash with the `htpasswd` recipe above for a new password.
+2. Either set `api.adminAccount.passwordHash` in values and run `helm upgrade`, or patch the API server Secret directly:
+
+   ```sh
+   kubectl patch secret -n <release-namespace> <fullname>-api \
+     --type=json \
+     -p='[{"op":"replace","path":"/data/ADMIN_ACCOUNT_PASSWORD_HASH","value":"<base64-of-new-hash>"}]'
+   ```
+
+3. Restart the API server Deployment so it picks up the new Secret.
+
+There is no `helm rollback`-style recovery for a password the chart generated and you never recorded; the bcrypt hash is one-way and the plaintext is unrecoverable. Setting a new hash is the only path.

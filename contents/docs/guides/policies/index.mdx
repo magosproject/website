@@ -1,0 +1,206 @@
+---
+title: Policy Validation
+description: Gate Terraform applies on plan-time policy checks using Kyverno ValidatingPolicy resources.
+---
+
+Magos can evaluate the JSON output of `terraform plan` against [Kyverno](https://kyverno.io) `ValidatingPolicy` resources before `terraform apply` runs. A policy violation blocks apply, surfaces a `ValidationFailed` phase on the Workspace, and lists the specific failures in status. This is how you stop a non-compliant change at the plan boundary rather than discovering it after it has touched cloud APIs.
+
+## How it works
+
+When a Workspace's effective `validation.policySelector` is non-empty, the plan [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/) pod does three extra things:
+
+1. After `terraform plan` succeeds, it runs `terraform show -json` and writes the plan JSON to the per-Workspace PVC.
+2. It lists `ValidatingPolicy` resources matching the selector, materialises them into the [Pod](https://kubernetes.io/docs/concepts/workloads/pods/), and invokes the embedded `kyverno apply` CLI against the plan JSON.
+3. It prints a single structured `MAGOS_RESULT:` line to its stdout. The workspace controller scans the Pod log, parses the line, and writes the violations (if any) to `status.policyViolations`.
+
+A clean evaluation moves the Workspace to `Planned` and the run proceeds to apply. A violation's effect depends on the policy's failure mode: `Deny`-mode (`Enforce`) violations move the Workspace to `ValidationFailed` and apply is skipped; `Audit`-mode violations move the Workspace to `PlannedWithViolations` and apply waits for operator approval. See [Audit vs Enforce](#audit-vs-enforce) below.
+
+## Selecting policies
+
+The policy selector is a Kubernetes [LabelSelector](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/) that matches `ValidatingPolicy` resources in the cluster. Label your policies and select by label. Conventional axes include `compliance` (framework values like `pci-dss`, `soc2`, `hipaa`), `owner` (the team that maintains the policy, for example `cloud-security`), and `enforcement` (`blocking` or `audit`).
+
+A Project-wide default:
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Project
+metadata:
+  name: payments-platform
+  namespace: default
+spec:
+  validation:
+    policySelector:
+      matchExpressions:
+        - key: compliance
+          operator: In
+          values:
+            - pci-dss
+            - soc2
+```
+
+A Workspace-level override (fully replaces the Project default, not merged):
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Workspace
+metadata:
+  name: prod-fraud-detection
+  labels:
+    env: prod
+spec:
+  projectRef:
+    name: payments-platform
+  validation:
+    policySelector:
+      matchLabels:
+        compliance: pci-dss
+  # ... source, terraform, etc.
+```
+
+Omitting `spec.validation` on a Workspace inherits the Project's selector. Setting `spec.validation: {}` explicitly disables policy validation for that Workspace.
+
+## Writing a ValidatingPolicy
+
+`ValidatingPolicy` is a standard Kyverno resource and Magos does not extend its shape. The only Magos-specific requirement is that the policy evaluates the JSON shape produced by `terraform show -json`. The plan JSON's top level has fields like `terraform_version`, `planned_values`, and `resource_changes`.
+
+A minimal example:
+
+```yaml
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: require-subnet-entropy
+  labels:
+    compliance: pci-dss
+    owner: cloud-security
+    enforcement: blocking
+spec:
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-terraform-plan
+      expression: 'has(object.planned_values) && has(object.terraform_version)'
+  validations:
+    - message: 'random_id.server.byte_length must be 1'
+      expression: |
+        (
+          has(object.planned_values.root_module.resources) &&
+          object.planned_values.root_module.resources.exists(
+            r, r.type == 'random_id' && r.name == 'server' && r.values.byte_length == 1
+          )
+        )
+```
+
+Three things to note:
+
+- `evaluation.mode: JSON` tells Kyverno the input is JSON, not a Kubernetes object. Magos always feeds plan JSON, so every Magos-targeted policy uses this mode.
+- The `matchConditions` block guards the policy so it does not accidentally fire against unrelated JSON shapes.
+- The `validations[].expression` uses CEL against the plan JSON shape. The structure is whatever `terraform show -json` produces for your module.
+
+For policies that target specific resource types (an S3 bucket needs encryption, a security group must not allow `0.0.0.0/0` on 22), iterate over `object.resource_changes` and assert on `change.after` for each candidate.
+
+## Required cluster setup
+
+The chart ships the `policies.kyverno.io/v1` `ValidatingPolicy` CRD by default. On clusters where Kyverno is already installed, set `policy.kyverno.installCRD=false` in chart values so Magos does not collide with Kyverno's own CRD lifecycle.
+
+The `magos-job` [ServiceAccount](https://kubernetes.io/docs/concepts/security/service-accounts/) (created by the chart) has `get/list/watch` on `validatingpolicies.policies.kyverno.io`. If you replace the runner ServiceAccount with your own (for example to bind a Workload Identity), the replacement must carry the same [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/), or policy validation will silently skip with a permission error in the Pod log.
+
+## Reading violations
+
+When a Workspace reaches `ValidationFailed`, the violations are on `.status`:
+
+```plaintext
+kubectl get workspace prod-fraud-detection -o yaml
+```
+
+```yaml
+status:
+  phase: ValidationFailed
+  reason: PolicyViolation
+  message: Plan violated 2 policy rule(s)
+  policyViolations:
+    - policy: require-subnet-entropy
+      message: random_id.server.byte_length must be 1
+    - policy: require-encryption-at-rest
+      message: aws_s3_bucket.data must enable server-side encryption
+```
+
+The same list is rendered in the UI on the Workspace detail page. Once you fix the underlying module, the next plan cycle will succeed and the run will proceed normally.
+
+## Audit vs Enforce
+
+A `ValidatingPolicy` declares its failure mode in `spec.validationActions`. Magos maps the entries to one of two gating behaviors:
+
+- `Deny` (and `Warn`, treated conservatively as the same) is `Enforce`-equivalent. Violations move the Workspace to `ValidationFailed`, apply is skipped, and the operator cannot approve through. The fix is to change the underlying Terraform (or the policy) so the next plan no longer violates.
+- `Audit`-only policies are non-blocking warnings. Violations move the Workspace to `PlannedWithViolations`, and apply waits for operator approval regardless of `spec.autoApply`. The UI requires the operator to acknowledge each warning before the Approve button enables, and the run history records `approved (with warnings)` for the audit trail.
+
+A blocking policy:
+
+```yaml
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: deny-public-s3
+  labels:
+    compliance: pci-dss
+    owner: cloud-security
+    enforcement: blocking
+spec:
+  validationActions:
+    - Deny
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-terraform-plan
+      expression: 'has(object.planned_values)'
+  validations:
+    - message: 'aws_s3_bucket must not be public'
+      expression: |
+        !object.resource_changes.exists(
+          c, c.type == 'aws_s3_bucket' &&
+             has(c.change.after) &&
+             c.change.after.acl == 'public-read'
+        )
+```
+
+A warning policy:
+
+```yaml
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: missing-cost-center-tag
+  labels:
+    compliance: tagging
+    owner: finops
+    enforcement: warning
+spec:
+  validationActions:
+    - Audit
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-terraform-plan
+      expression: 'has(object.planned_values)'
+  validations:
+    - message: 'resource missing required tag cost-center'
+      expression: |
+        !object.resource_changes.exists(
+          c, has(c.change.after.tags) && !('cost-center' in c.change.after.tags)
+        )
+```
+
+When the same Project selector matches both, an apply that triggers the FinOps audit only is approvable; an apply that triggers the PCI deny is not. The two layer cleanly: policy authors decide whether their rule is non-negotiable or merely an opt-in heads-up.
+
+## Gated auto-apply
+
+`spec.autoApply` controls whether a plan with no policy issues auto-applies. With `true` (default), clean plans go straight to apply. With `false`, every plan parks in `Planned` and waits for approval. Audit-mode warnings always require approval regardless of `autoApply`. See [Workspaces → AutoApply and approval](/docs/concepts/workspaces#autoapply-and-approval) for the runID-bound approval contract and `spec.discardStalePlan` for what happens when a new commit lands during the gate.
+
+## When to use what
+
+- **`Deny` (Enforce)** for "this change must not happen": encryption settings, allowed regions, networks open to the world. Operators cannot approve through.
+- **`Audit`** for opt-in heads-up: tag conventions, cost-center coverage, naming standards. Operators can approve through after acknowledging.
+- **Workspace-level `validation` override** for environments that need a stricter or looser policy set (typically prod gets all categories, dev gets only the cheapest checks).
+- **`autoApply: false`** when even a clean plan should pause for review.
+
+The four layer together: Enforce policies as the mechanical hard gate, Audit policies as the mechanical soft gate, approval as the human checkpoint on soft gates, `autoApply` as the master switch over clean plans.

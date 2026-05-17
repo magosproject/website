@@ -1,0 +1,105 @@
+---
+title: Variable Sets
+description: Reusable bundles of Terraform inputs sourced from inline values, Kubernetes Secrets, or ConfigMaps.
+---
+
+A `VariableSet` is a namespaced Kubernetes resource that declares a reusable bundle of Terraform input variables. Each variable in the set is either an inline literal or a reference to a key inside a [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) or a [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/) in the same namespace. Workspaces consume Variable Sets through `spec.variableSetRef`, either at the Project level (where they cascade to every member Workspace) or at the Workspace level (where they layer on top).
+
+Resolved values reach Terraform as `TF_VAR_<name>` environment variables on the plan and apply pods. The kubelet performs the actual read of Secret data at pod start; the resolved bytes never traverse the controller process and never land on the CR.
+
+## Anatomy
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: VariableSet
+metadata:
+  name: platform-shared
+  namespace: default
+spec:
+  description: Shared region and bootstrap secrets
+  variables:
+    - name: region
+      value: us-east-1
+    - name: db_admin_password
+      valueFrom:
+        secretKeyRef:
+          name: networking-db-admin
+          key: password
+    - name: log_retention_days
+      valueFrom:
+        configMapKeyRef:
+          name: platform-defaults
+          key: log_retention_days
+          optional: true
+```
+
+Each entry under `variables` has a `name` (a valid Terraform identifier) and exactly one of:
+
+- `value`: an inline literal. Stored verbatim on the CR; use only for non-sensitive data.
+- `valueFrom.secretKeyRef`: `{name, key, optional}` pointing at a Secret in the same namespace.
+- `valueFrom.configMapKeyRef`: `{name, key, optional}` pointing at a ConfigMap in the same namespace.
+
+The "exactly one of" rule is enforced at admission time by a CEL `XValidation`, so the API server rejects a malformed entry before the controller ever sees it. Duplicate variable names within a single Variable Set are also rejected.
+
+## Composition and precedence
+
+A Workspace can pull variables from two places: Variable Sets attached to its Project, and Variable Sets attached to the Workspace itself. Magos merges them into a single set of variables that the runner pod sees.
+
+The merge happens in two passes. First, Magos reads the Project's Variable Sets in the order they are listed. Then it reads the Workspace's Variable Sets, also in order. If two Variable Sets define a variable with the same name, the one Magos reads later wins. Workspace Variable Sets are read after Project ones, so they always override the Project's value for that variable.
+
+The example below shows it in practice:
+
+```yaml
+# Project: networking
+spec:
+  variableSetRef:
+    - name: aws-shared
+    - name: env-defaults
+```
+
+```yaml
+# Workspace: vpc-prod
+spec:
+  projectRef:
+    name: networking
+  variableSetRef:
+    - name: env-prod
+```
+
+When Magos resolves variables for `vpc-prod`, it reads `aws-shared` first, then `env-defaults`, then `env-prod`. If `aws-shared` and `env-prod` both define `region`, the value from `env-prod` is the one the Workspace uses, because it was read last.
+
+The same rule applies regardless of where the value comes from. An inline value can override a Secret-backed value, a Secret-backed value can override a ConfigMap-backed value, and so on.
+
+`TF_VAR_*` environment variables take precedence over values in any `.tfvars` file (Terraform's own rule), so Variable Sets always win over `spec.terraform.tfvarsPath`.
+
+## Optional references
+
+The `optional` flag on a `secretKeyRef` or `configMapKeyRef` flips the behavior when the source is missing:
+
+- `optional: false` (default): a missing Secret, missing ConfigMap, or missing key surfaces on the VariableSet status as an `unresolvedReferences` entry and the consumer Workspace transitions to `Failed` with reason `UnresolvedVariables`. No plan [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/) is created.
+- `optional: true`: the missing source is treated as a no-op. The variable is silently dropped from the pod env. The flag is propagated to the pod's `SecretKeySelector` / `ConfigMapKeySelector` so the kubelet also treats a same-name disappearance between resolve time and pod start as a no-op.
+
+Use `optional: true` for env-specific overrides that legitimately do not exist in some environments. Use `optional: false` for required inputs you want to fail loudly on.
+
+## Status
+
+A VariableSet reports its health on `.status`:
+
+- `phase: Ready` and `reason: AllReferencesResolved` when every required reference resolves cleanly.
+- `phase: Failed` and `reason: UnresolvedReferences` when one or more references could not be read. The full list lives under `status.unresolvedReferences`, with `kind`, `name`, `key`, and a `reason` code (`ResourceNotFound`, `KeyNotFound`, `Forbidden`).
+- `status.resolvedVariables` is the count of variables that produced a usable source.
+
+The resolved values themselves never appear on status. The controller deliberately captures only the source identity (name, key, resourceVersion) and the count.
+
+## Rotation
+
+The VariableSet controller watches the referenced Secrets and ConfigMaps. When their `resourceVersion` changes (which is what happens on rotation), the controller re-evaluates the VariableSet and updates its status. A status update propagates to consumer Workspaces through the workspace controller's watch on VariableSets, which recomputes a per-Workspace variable fingerprint. If the fingerprint changes, because the underlying Secret data rotated, the Workspace triggers a fresh plan and apply cycle automatically.
+
+This is how a rotated database password reaches running infrastructure without an operator manually re-running anything.
+
+## What a Variable Set is not
+
+- **Not a Kubernetes Secret.** A Variable Set is a reference layer; it does not create or own the underlying Secret or ConfigMap. Bring your own (hand-rolled, sealed-secrets, External Secrets Operator, Vault Secrets Operator, etc.).
+- **Not a substitute for `terraform.tfvars`.** Variables in source-controlled `.tfvars` are fine for static, non-sensitive defaults. Variable Sets are for shared and rotated inputs that belong in Kubernetes resources.
+- **Not cross-namespace.** Variable Sets, the Secrets and ConfigMaps they reference, and the Workspaces that consume them all live in the same namespace.
+

@@ -1,0 +1,80 @@
+---
+title: Projects
+description: The logical boundary that groups Workspaces and supplies shared inputs.
+---
+
+A `Project` is a cluster-scoped Kubernetes resource that owns a namespace of the same name and defines a logical boundary for a set of related Workspaces. It is the place where you attach shared variables, set a default plan-time policy selector, and bind a `Rollout` for ordered execution.
+
+A Project does not execute Terraform. It is a grouping and configuration layer; all execution lives in the Workspaces it groups.
+
+## What a Project does
+
+The Project controller has three responsibilities:
+
+1. **Namespace ownership.** On first reconcile the Project controller creates a Kubernetes namespace whose name matches the Project, labels it `magosproject.io/project=true`, and sets an owner reference back to the Project. The namespace is where Workspaces, Rollouts, and VariableSets belonging to this Project live. Deleting the Project garbage-collects the namespace.
+2. **Orchestration mode selection.** If a `Rollout` of the same name exists in the Project's namespace, the Project sets `status.reason=ManagedByRollout` and defers all execution decisions to the Rollout controller. If no Rollout exists, the Project enters `DefaultParallel` mode and grants execution permission to every member Workspace by adding the `magosproject.io/execution-allowed=true` annotation.
+3. **Default propagation.** A Project can declare a default `validation.policySelector` and a list of `variableSetRef` entries. Member Workspaces inherit both unless they explicitly override.
+
+Workspaces declare their Project membership through `spec.projectRef.name`. The relationship is by-name, scoped to the Project's namespace, and unidirectional: a Workspace knows its Project; a Project does not maintain a list of Workspace pointers.
+
+## Minimal Project
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Project
+metadata:
+  name: networking
+spec:
+  description: Cloud Networking Platform
+```
+
+That is enough. A Workspace whose `spec.projectRef.name` is `networking` will be granted execution permission by the Project controller as soon as no overriding Rollout exists.
+
+## A Project with shared variables and a default policy
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Project
+metadata:
+  name: payments-platform
+spec:
+  description: Payments Platform
+  variableSetRef:
+    - name: aws-shared
+    - name: payments-defaults
+  validation:
+    policySelector:
+      matchExpressions:
+        - key: compliance
+          operator: In
+          values:
+            - pci-dss
+            - soc2
+```
+
+Here, every Workspace that joins this Project automatically inherits two `VariableSet`s (`aws-shared` and `payments-defaults`) and is gated by every `ValidatingPolicy` labelled `compliance=pci-dss` or `compliance=soc2`. A Workspace that needs a different policy set can declare its own `spec.validation`; a Workspace-level `validation` block fully overrides the Project default rather than merging with it.
+
+## Lifecycle
+
+The Project controller reaches `Ready` as soon as it has decided which orchestration mode to use. `status.phase` is `Ready` and `status.reason` is either:
+
+- `DefaultParallel`: no matching Rollout, every member Workspace is auto-granted execution permission, or
+- `ManagedByRollout`: a Rollout of the same name exists, orchestration is delegated to it.
+
+Both are healthy. The reason field is the operator-facing signal for which mode is active.
+
+## Deletion
+
+Projects do not own infrastructure directly. Deleting a Project removes the resource, but the Workspaces that referenced it remain. Those Workspaces will reach `Pending` with reason `AwaitingRollout` because no Project is around to grant `DefaultParallel`, which is the correct conservative default: a Workspace whose Project has gone away should not keep executing.
+
+To fully tear down, delete the Workspaces first, then the Project.
+
+## What a Project is not
+
+A few things a Project deliberately does not do:
+
+- **It does not execute Terraform.** Only Workspaces do. The Project controller never creates a [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/).
+- **It does not store state.** Variable values are not held on the Project; only references to `VariableSet`s are.
+- **It does not federate across its own namespace.** Workspaces, Rollouts, and VariableSets belonging to a Project must live in the Project's namespace. Cross-namespace references are not supported. Use separate Projects (and therefore separate namespaces) when you need separation between groups.
+
+See [Workspaces](/docs/concepts/workspaces) for the execution layer, [Variable Sets](/docs/concepts/variable-sets) for how shared inputs flow into Workspaces, and [Rollouts](/docs/concepts/rollouts) for ordered orchestration.

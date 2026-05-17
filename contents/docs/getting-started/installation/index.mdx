@@ -4,85 +4,168 @@ description: Install Magos on Kubernetes using the official Helm chart.
 ---
 
 <Note type="danger" title="Under Development">
-  Magos is currently in active development. The chart name, values, and distribution URL may change before the first stable release. Follow our GitHub organization for release announcements.
+  Magos is currently in active development. The chart values and distribution URL may change before the first stable release. Follow our GitHub organization for release announcements.
 </Note>
 
 Magos is distributed as a Helm chart and is intended to run inside a Kubernetes cluster.
 
 ## Prerequisites
 
-- A Kubernetes cluster (v1.24+ recommended)
-- `kubectl` configured to talk to the cluster
-- Helm v3 installed
+- A Kubernetes cluster running v1.28 or newer.
+- `kubectl` configured to reach that cluster.
+- Helm v3.
+- Cluster-admin permission for the install (Magos creates `ClusterRole` and `CustomResourceDefinition` resources).
+- cert-manager v1+ installed in the cluster if you plan to use the chart's self-signed TLS option (the default for the Ingress and on-pod TLS paths). Skip this if you bring your own TLS Secret.
 
 ## Install with Helm
 
-### 1) Add the chart repository
-
-Add the Magos chart repository and fetch the latest index:
-
 ```plaintext
-helm repo add magos https://magosproject.io/charts
-helm repo update
-```
-
-### 2) Install Magos
-
-Install Magos into the `magos` namespace (created automatically if missing):
-
-```plaintext
-helm install magos magos/magos \
-  --namespace magos \
+helm install magos \
+  oci://ghcr.io/magosproject/magos/charts/magos \
+  --namespace magos-system \
   --create-namespace
 ```
 
-### 3) Verify the installation
+The default install brings up the API server, the UI, all five controllers (workspace, project, rollout, variableset, refwatcher), an embedded Postgres StatefulSet, and an embedded RustFS deployment for log storage. No additional configuration is required to get a working cluster.
 
-Wait for the workloads to become ready:
+Verify the workloads are ready:
 
 ```plaintext
-kubectl -n magos get pods
+kubectl -n magos-system get pods
 ```
+
+You should see one Pod per controller plus the API, UI, Postgres, and RustFS Pods in the `Running` state.
 
 ## Upgrade
 
-To upgrade an existing installation (or install if it doesn’t exist yet):
-
 ```plaintext
-helm upgrade --install magos magos/magos \
-  --namespace magos
+helm upgrade --install magos \
+  oci://ghcr.io/magosproject/magos/charts/magos \
+  --namespace magos-system
 ```
 
 ## Uninstall
 
-To remove Magos from the cluster:
-
 ```plaintext
-helm uninstall magos --namespace magos
+helm uninstall magos --namespace magos-system
 ```
+
+The chart leaves the `CustomResourceDefinition`s and the runtime data (Postgres volume, RustFS PVC) in place by design, so an accidental uninstall does not destroy your run history. Clean those up explicitly if you want a fresh slate.
 
 ## Configuration
 
-Start from the default values and customize as needed:
+Render the default values to a file, edit, and reinstall:
 
 ```plaintext
-helm show values magos/magos > values.yaml
-```
-
-Apply your configuration by passing the values file:
-
-```plaintext
-helm upgrade --install magos magos/magos \
-  --namespace magos \
+helm show values oci://ghcr.io/magosproject/magos/charts/magos > values.yaml
+helm upgrade --install magos \
+  oci://ghcr.io/magosproject/magos/charts/magos \
+  --namespace magos-system \
   -f values.yaml
 ```
 
-## Accessing Magos
+A few values worth knowing about:
 
-Magos typically exposes a Kubernetes Service. If you’re running it with a ClusterIP service (the default in many charts), you can use port-forwarding for local access:
+- `policy.kyverno.installCRD` controls whether the chart ships the `policies.kyverno.io/v1` `ValidatingPolicy` CRD itself. Leave it `true` on clusters that do not have Kyverno installed; set it to `false` on clusters that do, so Magos does not collide with Kyverno's own CRD lifecycle.
+- `auth.*` configures OIDC login for the UI and API. This is where you set the issuer URL, client ID, redirect URL, claim mapping, and Secret references for the client secret and session secret. See [OpenID Connect](/docs/operations/authentication/oidc).
+
+- `postgres.mode` selects between `embedded` (default) and `external`. In embedded mode the chart deploys a Postgres 16 StatefulSet and auto-generates a random password on first install, preserving it across upgrades via Helm's `lookup`. To use your own PostgreSQL instance, set `postgres.mode=external` and supply `postgres.external.host`, `postgres.external.port`, `postgres.external.database`, `postgres.external.username`, and `postgres.external.secret.name`. The Secret must contain the password under the key named by `postgres.external.secret.passwordKey` (defaults to `password`).
+
+- `logs.storage.mode` follows the same pattern. In embedded mode the chart deploys RustFS, an S3-compatible object store, and auto-generates credentials. To use your own S3-compatible endpoint, set `logs.storage.mode=external` along with `logs.storage.external.endpoint` and `logs.storage.external.secret.name`. The Secret must contain the access key and secret key under the keys named by `logs.storage.external.secret.accessKeyKey` and `logs.storage.external.secret.secretKeyKey` (both default to `accessKey` and `secretKey` respectively).
+
+- `ui.host`, `ui.ingress.enabled`, `ui.ingress.tls.selfSignedCert`, and `ui.ingress.tls.secretName` control how the UI (and API) are exposed to clients. See the next section for details.
+
+## Exposing the UI and API
+
+The UI's nginx reverse proxy forwards all requests under `/apis/*` to the API Service in-cluster. This means a single Ingress aimed at the UI Service covers both the UI and the API. Clients reach the API at `<host>/apis/v1/...` through the same front door used for the UI.
+
+### Default (no Ingress)
+
+Without an Ingress, the UI Service is a `ClusterIP`. Use a port-forward for local access:
 
 ```plaintext
-kubectl -n magos port-forward svc/magos 8080:80
+kubectl -n magos-system port-forward svc/magos-ui 8080:80
 ```
 
-If your chart values expose an ingress or a LoadBalancer service instead, access Magos using the hostname/IP assigned by your cluster.
+Then open `http://localhost:8080`.
+
+### Ingress with a self-signed cert
+
+Set `ui.ingress.enabled=true` and `ui.host` to your chosen hostname. With the default `ui.ingress.tls.selfSignedCert=true`, the chart renders a cert-manager `Certificate` resource issued by a chart-managed `magos-selfsigned-cert-issuer`. cert-manager must be installed in the cluster.
+
+```yaml
+ui:
+  host: magos.example.com
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+```
+
+Once DNS for `magos.example.com` resolves to your Ingress controller, browse to `https://magos.example.com`. API calls hit `https://magos.example.com/apis/v1/...`.
+
+### Ingress with a BYO TLS Secret
+
+If you manage your own certificate, set `ui.ingress.tls.selfSignedCert=false` and point `ui.ingress.tls.secretName` at a Secret you have created in the `magos-system` namespace:
+
+```yaml
+ui:
+  host: magos.example.com
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    tls:
+      selfSignedCert: false
+      secretName: your-tls-secret
+```
+
+No cert-manager resources are rendered in this case.
+
+### On-pod TLS without an Ingress
+
+For clusters without an Ingress controller, set `ui.tls.enabled=true`. The UI nginx configuration adds a `listen 443 ssl` server block fed from the Secret named by `ui.tls.secretName`. With `ui.tls.selfSignedCert=true` the chart generates the certificate via cert-manager, same as the Ingress path.
+
+## Production example
+
+The following values file connects Magos to an external Postgres database and an external S3-compatible object store, and exposes the front door through an Ingress with a BYO TLS certificate:
+
+```yaml
+ui:
+  host: magos.example.com
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    tls:
+      enabled: true
+      selfSignedCert: false
+      secretName: magos-ui-cert
+
+postgres:
+  mode: external
+  external:
+    host: postgres.internal.example.com
+    port: 5432
+    database: magos
+    username: magos
+    secret:
+      name: magos-postgres
+      passwordKey: password
+    sslMode: require
+
+logs:
+  storage:
+    mode: external
+    external:
+      endpoint: https://s3.internal.example.com
+      secret:
+        name: magos-s3
+        accessKeyKey: accessKey
+        secretKeyKey: secretKey
+```
+
+This configuration connects Magos to a PostgreSQL instance at `postgres.internal.example.com` using the password from a pre-existing Secret named `magos-postgres`. Log storage uses an S3-compatible endpoint at `s3.internal.example.com`, with credentials from a Secret named `magos-s3`. The UI and API are reachable at `https://magos.example.com` through an nginx Ingress, with TLS terminated at the Ingress controller using the Secret `magos-ui-cert`.
+
+If you enable OIDC login, make sure users access the UI through the same hostname you register with your identity provider, because the callback URL is served by Magos at `/auth/callback`.
+
+## Next steps
+
+Continue with the [Quickstart](/docs/getting-started/quickstart) to create your first `Project` and `Workspace`.

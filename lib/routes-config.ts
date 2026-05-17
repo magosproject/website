@@ -26,15 +26,19 @@ export const ROUTES: EachRoute[] = [
         href: "/installation",
       },
       {
-        title: "Your first Workspace",
-        href: "/first-workspace",
+        title: "Quickstart",
+        href: "/quickstart",
       },
     ],
   },
   {
-    title: "Magos",
-    href: "/magos",
+    title: "Concepts",
+    href: "/concepts",
     items: [
+      {
+        title: "Architecture",
+        href: "/architecture",
+      },
       {
         title: "Projects",
         href: "/projects",
@@ -44,18 +48,86 @@ export const ROUTES: EachRoute[] = [
         href: "/workspaces",
       },
       {
+        title: "Variable Sets",
+        href: "/variable-sets",
+      },
+      {
         title: "Rollouts",
         href: "/rollouts",
       },
+    ],
+  },
+  {
+    title: "Guides",
+    href: "/guides",
+    items: [
       {
-        title: "Variable Sets",
-        href: "/variablesets",
+        title: "Connecting Git Repositories",
+        href: "/git",
       },
       {
-        title: "Contributing",
-        href: "/contributing",
+        title: "Cloud Provider Credentials",
+        href: "/cloud-credentials",
+      },
+      {
+        title: "Policy Validation",
+        href: "/policies",
+      },
+      {
+        title: "Rollout Strategies",
+        href: "/rollout-strategies",
       },
     ],
+  },
+  {
+    title: "Operations",
+    href: "/operations",
+    items: [
+      {
+        title: "Security and RBAC",
+        href: "/security",
+      },
+      {
+        title: "Observability",
+        href: "/observability",
+      },
+      {
+        title: "Authentication",
+        href: "/authentication",
+        items: [
+          {
+            title: "Admin account",
+            href: "/admin-account",
+          },
+          {
+            title: "OpenID Connect",
+            href: "/oidc",
+          },
+          {
+            title: "Dex",
+            href: "/dex",
+          },
+        ],
+      },
+    ],
+  },
+  {
+    title: "Reference",
+    href: "/reference",
+    items: [
+      {
+        title: "API Reference",
+        href: "/api",
+      },
+      {
+        title: "Annotations",
+        href: "/annotations",
+      },
+    ],
+  },
+  {
+    title: "Contributing",
+    href: "/contributing",
   },
 ];
 

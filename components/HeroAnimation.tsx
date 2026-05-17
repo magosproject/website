@@ -26,7 +26,7 @@ const sourceGroups: FlowGroup[] = [
   {
     title: "Infrastructure",
     items: [
-      { label: "Terraform", icon: <Icon icon="simple-icons:terraform" className="w-5 h-5 text-muted-foreground" /> },
+      { label: "Terraform", icon: <Icon icon="simple-icons:terraform" className="w-6 h-6 text-muted-foreground -m-0.5" /> },
       { label: "AWS", icon: <Icon icon="simple-icons:amazonaws" className="w-5 h-5 text-muted-foreground" /> },
       { label: "Azure", icon: <Icon icon="simple-icons:microsoftazure" className="w-5 h-5 text-muted-foreground" /> },
       { label: "GCP", icon: <Icon icon="simple-icons:googlecloud" className="w-5 h-5 text-muted-foreground" /> },
@@ -45,7 +45,7 @@ const consumerGroups: FlowGroup[] = [
   {
     title: "State",
     items: [
-      { label: "Kubernetes", icon: <Icon icon="simple-icons:kubernetes" className="w-5 h-5 shrink-0 text-muted-foreground" /> },
+      { label: "K8s", icon: <Icon icon="simple-icons:kubernetes" className="w-5 h-5 shrink-0 text-muted-foreground" /> },
       { label: "CRDs", icon: <Icon icon="simple-icons:kubernetes" className="w-5 h-5 shrink-0 text-muted-foreground" /> },
     ],
   },
