@@ -1,0 +1,16 @@
+---
+title: Concepts
+description: The four Magos resources and the controller architecture that reconciles them.
+---
+
+Magos models Terraform delivery as five Kubernetes resources reconciled by five controllers. Each page in this section covers one of them:
+
+- [Architecture](/docs/concepts/architecture): the controller fleet, the runner pod model, and how a single change flows from `kubectl apply` to applied Terraform.
+- [Projects](/docs/concepts/projects): the logical boundary that groups Workspaces and provides shared inputs.
+- [Workspaces](/docs/concepts/workspaces): the unit of Terraform execution; one Workspace, one module, one environment.
+- [Variable Sets](/docs/concepts/variable-sets): reusable bundles of Terraform inputs sourced from inline values, Kubernetes Secrets, or ConfigMaps.
+- [Rollouts](/docs/concepts/rollouts): ordered, label-driven orchestration that grants execution permission across a sequence of Workspaces.
+
+Read Architecture first if you want the mental model. Read the four resource pages first if you want to recognise the YAML.
+
+<Outlet path="../" />

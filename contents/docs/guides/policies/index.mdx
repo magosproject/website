@@ -1,0 +1,140 @@
+---
+title: Policy Validation
+description: Gate Terraform applies on plan-time policy checks using Kyverno ValidatingPolicy resources.
+---
+
+Magos can evaluate the JSON output of `terraform plan` against [Kyverno](https://kyverno.io) `ValidatingPolicy` resources before `terraform apply` runs. A policy violation blocks apply, surfaces a `ValidationFailed` phase on the Workspace, and lists the specific failures in status. This is how you stop a non-compliant change at the plan boundary rather than discovering it after it has touched cloud APIs.
+
+## How it works
+
+When a Workspace's effective `validation.policySelector` is non-empty, the plan [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/) pod does three extra things:
+
+1. After `terraform plan` succeeds, it runs `terraform show -json` and writes the plan JSON to the per-Workspace PVC.
+2. It lists `ValidatingPolicy` resources matching the selector, materialises them into the [Pod](https://kubernetes.io/docs/concepts/workloads/pods/), and invokes the embedded `kyverno apply` CLI against the plan JSON.
+3. It prints a single structured `MAGOS_RESULT:` line to its stdout. The workspace controller scans the Pod log, parses the line, and writes the violations (if any) to `status.policyViolations`.
+
+A clean evaluation moves the Workspace to `Planned` and the run proceeds to apply. A violation moves the Workspace to `ValidationFailed` and apply is skipped.
+
+## Selecting policies
+
+The policy selector is a Kubernetes [LabelSelector](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/) that matches `ValidatingPolicy` resources in the cluster. Label your policies and select by label. Conventional labels include category (`security`, `compliance`, `cost`) and scope (`platform`, `data`, `payments`).
+
+A Project-wide default:
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Project
+metadata:
+  name: payments-platform
+  namespace: default
+spec:
+  validation:
+    policySelector:
+      matchExpressions:
+        - key: policy.magosproject.io/category
+          operator: In
+          values:
+            - compliance
+            - security
+```
+
+A Workspace-level override (fully replaces the Project default, not merged):
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Workspace
+metadata:
+  name: prod-fraud-detection
+  labels:
+    env: prod
+spec:
+  projectRef:
+    name: payments-platform
+  validation:
+    policySelector:
+      matchLabels:
+        policy.magosproject.io/category: compliance
+  # ... source, terraform, etc.
+```
+
+Omitting `spec.validation` on a Workspace inherits the Project's selector. Setting `spec.validation: {}` explicitly disables policy validation for that Workspace.
+
+## Writing a ValidatingPolicy
+
+`ValidatingPolicy` is a standard Kyverno resource and Magos does not extend its shape. The only Magos-specific requirement is that the policy evaluates the JSON shape produced by `terraform show -json`. The plan JSON's top level has fields like `terraform_version`, `planned_values`, and `resource_changes`.
+
+A minimal example:
+
+```yaml
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: require-subnet-entropy
+  labels:
+    policy.magosproject.io/category: network-security
+spec:
+  evaluation:
+    mode: JSON
+  matchConditions:
+    - name: is-terraform-plan
+      expression: 'has(object.planned_values) && has(object.terraform_version)'
+  validations:
+    - message: 'random_id.server.byte_length must be 1'
+      expression: |
+        (
+          has(object.planned_values.root_module.resources) &&
+          object.planned_values.root_module.resources.exists(
+            r, r.type == 'random_id' && r.name == 'server' && r.values.byte_length == 1
+          )
+        )
+```
+
+Three things to note:
+
+- `evaluation.mode: JSON` tells Kyverno the input is JSON, not a Kubernetes object. Magos always feeds plan JSON, so every Magos-targeted policy uses this mode.
+- The `matchConditions` block guards the policy so it does not accidentally fire against unrelated JSON shapes.
+- The `validations[].expression` uses CEL against the plan JSON shape. The structure is whatever `terraform show -json` produces for your module.
+
+For policies that target specific resource types (an S3 bucket needs encryption, a security group must not allow `0.0.0.0/0` on 22), iterate over `object.resource_changes` and assert on `change.after` for each candidate.
+
+## Required cluster setup
+
+The chart ships the `policies.kyverno.io/v1` `ValidatingPolicy` CRD by default. On clusters where Kyverno is already installed, set `policy.kyverno.installCRD=false` in chart values so Magos does not collide with Kyverno's own CRD lifecycle.
+
+The `magos-job` [ServiceAccount](https://kubernetes.io/docs/concepts/security/service-accounts/) (created by the chart) has `get/list/watch` on `validatingpolicies.policies.kyverno.io`. If you replace the runner ServiceAccount with your own (for example to bind a Workload Identity), the replacement must carry the same [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/), or policy validation will silently skip with a permission error in the Pod log.
+
+## Reading violations
+
+When a Workspace reaches `ValidationFailed`, the violations are on `.status`:
+
+```plaintext
+kubectl get workspace prod-fraud-detection -o yaml
+```
+
+```yaml
+status:
+  phase: ValidationFailed
+  reason: PolicyViolation
+  message: Plan violated 2 policy rule(s)
+  policyViolations:
+    - policy: require-subnet-entropy
+      message: random_id.server.byte_length must be 1
+    - policy: require-encryption-at-rest
+      message: aws_s3_bucket.data must enable server-side encryption
+```
+
+The same list is rendered in the UI on the Workspace detail page. Once you fix the underlying module, the next plan cycle will succeed and the run will proceed normally.
+
+## Gated auto-apply
+
+When `spec.autoApply` is `true` (default), a clean plan auto-progresses to apply. When `autoApply` is `false`, a clean plan parks the Workspace in `Planned` until Magos applies the approval, at which point the controller proceeds to apply. Policy validation runs in both modes; auto-apply only changes what happens after a clean plan, not whether the plan is gated by policy.
+
+A full approval workflow (per-environment reviewers, multi-step gates, attestations linked to policy results) is on the roadmap.
+
+## When to use what
+
+- **`ValidatingPolicy` against plan JSON** for "this change must not violate property X" rules: encryption settings, allowed regions, instance sizes, tag conventions.
+- **Workspace-level `validation` override** for environments that need a stricter or looser policy set (typically prod gets all categories, dev gets only the cheapest checks).
+- **`autoApply: false`** when the policy check alone is not enough and you want a human in the loop before changes touch cloud APIs.
+
+The three layer together: policy validation as the mechanical gate, approval as the human gate, autoApply as the master switch.

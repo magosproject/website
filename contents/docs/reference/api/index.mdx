@@ -1,0 +1,267 @@
+---
+title: API Reference
+description: Auto-generated reference for every Magos custom resource. Do not edit by hand; regenerate with 'make generate-api-reference' in the website repo.
+---
+
+# API Reference
+
+## Packages
+- [magosproject.io/v1alpha1](#magosprojectiov1alpha1)
+
+
+## magosproject.io/v1alpha1
+
+Package v1alpha1 contains API Schema definitions for the  v1alpha1 API group.
+
+### Resource Types
+- [Project](#project)
+- [Rollout](#rollout)
+- [VariableSet](#variableset)
+- [Workspace](#workspace)
+
+## Project
+Project is the Schema for the projects API
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `magosproject.io/v1alpha1` | | |
+| `kind` _string_ | `Project` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[ProjectSpec](#projectspec)_ | spec defines the desired state of Project |  | Required: \{\} <br /> |
+
+### ProjectSpec
+ProjectSpec defines the desired state of Project
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `description` _string_ | Description provides a human-readable description of the project's purpose. |  | Optional: \{\} <br /> |
+| `variableSetRef` _[VariableSetReference](#variablesetreference) array_ | VariableSetRef references one or more VariableSets to be applied to all Workspaces within this Project. |  | Optional: \{\} <br /> |
+| `validation` _[ValidationSpec](#validationspec)_ | Validation is the default plan-time validation configuration applied to<br />Workspaces in this Project that do not define their own. A Workspace<br />with an explicit Validation fully overrides this default. |  | Optional: \{\} <br /> |
+
+### ValidationSpec
+ValidationSpec configures how Terraform plans are evaluated against
+Kyverno ValidatingPolicy resources before apply. The same shape is used on
+both Project (where it defines the default for member Workspaces) and
+Workspace (where it overrides the Project default).
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `policySelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#labelselector-v1-meta)_ | PolicySelector selects Kyverno ValidatingPolicy resources<br />(policies.kyverno.io) by label. When nil, no policy validation is<br />performed. An empty selector (\{\}) matches every ValidatingPolicy in<br />the cluster. On a Project this acts as the default for any Workspace<br />that does not set its own Validation; on a Workspace this fully<br />overrides the Project default. |  | Optional: \{\} <br /> |
+
+### VariableSetReference
+VariableSetReference references a VariableSet resource
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name of the VariableSet. |  | MinLength: 1 <br />Required: \{\} <br /> |
+
+## Workspace
+Workspace is the Schema for the workspaces API
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `magosproject.io/v1alpha1` | | |
+| `kind` _string_ | `Workspace` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[WorkspaceSpec](#workspacespec)_ | spec defines the desired state of Workspace |  | Required: \{\} <br /> |
+
+### WorkspaceSpec
+WorkspaceSpec defines the desired state of Workspace
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `projectRef` _[ProjectReference](#projectreference)_ | ProjectRef is a reference to the project this workspace belongs to |  | Required: \{\} <br /> |
+| `autoApply` _boolean_ | AutoApply dictates whether the workspace should automatically apply after a successful plan | true | Optional: \{\} <br /> |
+| `annotations` _object (keys:string, values:string)_ | Annotations to propagate to both plan and apply Job pod templates.<br />Per-phase annotations in spec.plan or spec.apply take precedence on conflict. |  | Optional: \{\} <br /> |
+| `plan` _[JobOverrides](#joboverrides)_ | Plan holds overrides applied only to plan Jobs. |  | Optional: \{\} <br /> |
+| `apply` _[JobOverrides](#joboverrides)_ | Apply holds overrides applied only to apply Jobs. |  | Optional: \{\} <br /> |
+| `source` _[SourceSpec](#sourcespec)_ | Source defines the Git repository configuration |  | Required: \{\} <br /> |
+| `terraform` _[TerraformSpec](#terraformspec)_ | Terraform defines the Terraform or OpenTofu configuration |  | Required: \{\} <br /> |
+| `validation` _[ValidationSpec](#validationspec)_ | Validation configures plan-time policy validation for this Workspace.<br />When nil, the parent Project's Validation applies if set. When non-nil,<br />this fully overrides the Project default rather than merging with it. |  | Optional: \{\} <br /> |
+| `variableSetRef` _[VariableSetReference](#variablesetreference) array_ | VariableSetRef references one or more VariableSets that contribute<br />Terraform input variables to this Workspace. They layer on top of the<br />VariableSets attached to the parent Project: Project sets are applied<br />first in declaration order, then Workspace sets, and within that<br />combined order a later set's variable shadows an earlier set's<br />variable of the same name. Values resolved from VariableSets are<br />exposed to terraform as TF_VAR_\<name\> environment variables on the<br />plan and apply pods, which means they take precedence over any<br />matching variable declared in spec.terraform.tfvarsPath (env beats<br />.tfvars in Terraform's precedence rules). |  | Optional: \{\} <br /> |
+| `serviceAccountName` _string_ | ServiceAccountName is the ServiceAccount that plan and apply Job pods<br />run under. The ServiceAccount must exist in the same namespace as the<br />Workspace. Defaults to magos-job, which the Helm chart creates with<br />get;list;watch on validatingpolicies.policies.kyverno.io so the job can<br />fetch ValidatingPolicies at runtime. Override this to run pods under a<br />different identity, for example to bind a GKE Workload Identity or AWS<br />IRSA annotation; the replacement must carry the same RBAC. | magos-job | Optional: \{\} <br /> |
+
+### ProjectReference
+ProjectReference references a Project resource
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name of the Project. |  | MinLength: 1 <br />Required: \{\} <br /> |
+
+### JobOverrides
+JobOverrides holds per-phase configuration that is merged on top of the
+shared spec-level settings. Fields set here take precedence over the
+corresponding shared field.
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `annotations` _object (keys:string, values:string)_ | Annotations to add to the Job's pod template. Merged on top of<br />spec.annotations; values here win on conflict. |  | Optional: \{\} <br /> |
+| `timeoutSeconds` _integer_ | TimeoutSeconds sets the activeDeadlineSeconds on the Kubernetes Job.<br />If the Job does not finish within this duration, Kubernetes marks it<br />as Failed, preventing a Workspace from being stuck in Planning or<br />Applying indefinitely. When unset, DefaultJobTimeoutSeconds (86400) is<br />used. |  | Optional: \{\} <br /> |
+
+### SourceSpec
+SourceSpec defines the Git repository configuration
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `repoURL` _string_ | RepoURL is the URL of the Git repository to clone |  | Required: \{\} <br /> |
+| `targetRevision` _string_ | TargetRevision defines the commit, tag, or branch to checkout |  | Required: \{\} <br /> |
+| `path` _string_ | Path is the directory path within the Git repository | . | Optional: \{\} <br /> |
+
+### TerraformSpec
+TerraformSpec defines the Terraform or OpenTofu configuration
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `version` _string_ | Version is the Terraform or OpenTofu version to use |  | Required: \{\} <br /> |
+| `tfvarsPath` _string_ | TfvarsPath is the path to the tfvars file within the repository |  | Optional: \{\} <br /> |
+
+## Rollout
+Rollout is the Schema for the rollouts API
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `magosproject.io/v1alpha1` | | |
+| `kind` _string_ | `Rollout` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[RolloutSpec](#rolloutspec)_ | spec defines the desired state of Rollout |  | Required: \{\} <br /> |
+
+### RolloutSpec
+RolloutSpec defines the desired state of Rollout
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `projectRef` _string_ | ProjectRef is a reference to the project this rollout orchestrates |  | Required: \{\} <br /> |
+| `strategy` _[RolloutStrategy](#rolloutstrategy)_ | Strategy defines the rollout execution plan |  | Required: \{\} <br /> |
+
+### RolloutStrategy
+RolloutStrategy defines how the rollout should proceed
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `steps` _[RolloutStep](#rolloutstep) array_ | Steps defines the sequential stages of the rollout |  | Required: \{\} <br /> |
+
+### RolloutStep
+RolloutStep defines a single step in a rollout strategy
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name of the step |  | Required: \{\} <br /> |
+| `selector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#labelselector-v1-meta)_ | Selector to match workspaces for this step |  | Required: \{\} <br /> |
+
+## VariableSet
+VariableSet is the Schema for the variablesets API
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `magosproject.io/v1alpha1` | | |
+| `kind` _string_ | `VariableSet` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[VariableSetSpec](#variablesetspec)_ | spec defines the desired state of VariableSet |  | Required: \{\} <br /> |
+
+### VariableSetSpec
+VariableSetSpec defines the desired state of VariableSet.
+
+A VariableSet is a reusable bundle of Terraform input variables that is
+composed onto Workspaces by reference. Values can be literal strings or
+drawn from a Kubernetes Secret or ConfigMap in the same namespace. The
+workspace controller is what actually injects the resolved values into the
+plan and apply Job pods as TF_VAR_\<name\> environment variables; this
+controller is only responsible for validating references and surfacing
+their status.
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `description` _string_ | Description is a human-readable purpose for this VariableSet. Optional<br />and not consumed by any controller; it exists so that operators can<br />document intent in the same place as the data. |  | Optional: \{\} <br /> |
+| `variables` _[Variable](#variable) array_ | Variables is the ordered list of Terraform variables this set<br />contributes. Each entry becomes TF_VAR_\<name\> on the plan and apply<br />pods of any Workspace that references this set. Order is preserved on<br />the wire so that consumers can rely on a stable iteration order when<br />computing hashes, but ordering does not change semantics within a<br />single set: duplicate names are rejected. |  | MinItems: 1 <br /> |
+
+### Variable
+Variable is a single Terraform input variable definition. Exactly one of
+Value or ValueFrom must be set; the CEL rule on the type enforces that so
+the API server rejects misconfigured objects before they ever reach the
+controller.
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the Terraform variable name. The workspace controller exposes<br />it on the pod as TF_VAR_\<name\>, so it must be a valid Terraform<br />identifier: letters, digits, and underscores, not starting with a<br />digit. |  | MaxLength: 253 <br />MinLength: 1 <br />Pattern: `^[a-zA-Z_][a-zA-Z0-9_]*$` <br />Required: \{\} <br /> |
+| `value` _string_ | Value is an inline literal. Use this only for non-sensitive data<br />because the value is stored verbatim in the CR and is visible to<br />anyone with read access to VariableSets in the namespace. For<br />sensitive material use ValueFrom.SecretKeyRef instead: the<br />controller never writes the resolved value to the CR, status, or<br />logs, and the kubelet performs the actual read from the source<br />Secret at pod start. |  | Optional: \{\} <br /> |
+| `valueFrom` _[VariableSource](#variablesource)_ | ValueFrom sources the variable's value from another resource in the<br />same namespace. Mutually exclusive with Value. |  | Optional: \{\} <br /> |
+
+### VariableSource
+VariableSource describes where a variable's value should be read from.
+Exactly one of SecretKeyRef or ConfigMapKeyRef must be set.
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `secretKeyRef` _[KeySelector](#keyselector)_ | SecretKeyRef reads the value from a key inside a Kubernetes Secret in<br />the same namespace as the VariableSet. The kubelet resolves the value<br />at pod startup time when the workspace controller wires it into the<br />plan or apply Job, so the controller process never holds the secret<br />bytes in memory. |  | Optional: \{\} <br /> |
+| `configMapKeyRef` _[KeySelector](#keyselector)_ | ConfigMapKeyRef reads the value from a key inside a ConfigMap in the<br />same namespace. Useful for non-sensitive shared settings (region,<br />account IDs, feature flags) that you still want versioned alongside<br />your application configuration. |  | Optional: \{\} <br /> |
+
+### KeySelector
+KeySelector references a specific key inside a Secret or ConfigMap.
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name of the Secret or ConfigMap. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `key` _string_ | Key inside the resource's data map. Must be present on the source<br />object unless Optional is true. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `optional` _boolean_ | Optional, when true, treats a missing resource or missing key as a<br />no-op rather than an error. The variable is omitted from the pod<br />environment, and the missing reference is not reported in<br />VariableSetStatus.UnresolvedReferences. Useful for variables that are<br />only present in some environments (e.g. an optional staging-only<br />override). |  | Optional: \{\} <br /> |
+

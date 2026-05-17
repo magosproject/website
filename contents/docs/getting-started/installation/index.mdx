@@ -4,85 +4,81 @@ description: Install Magos on Kubernetes using the official Helm chart.
 ---
 
 <Note type="danger" title="Under Development">
-  Magos is currently in active development. The chart name, values, and distribution URL may change before the first stable release. Follow our GitHub organization for release announcements.
+  Magos is currently in active development. The chart values and distribution URL may change before the first stable release. Follow our GitHub organization for release announcements.
 </Note>
 
 Magos is distributed as a Helm chart and is intended to run inside a Kubernetes cluster.
 
 ## Prerequisites
 
-- A Kubernetes cluster (v1.24+ recommended)
-- `kubectl` configured to talk to the cluster
-- Helm v3 installed
+- A Kubernetes cluster running v1.28 or newer.
+- `kubectl` configured to reach that cluster.
+- Helm v3.
+- Cluster-admin permission for the install (Magos creates `ClusterRole` and `CustomResourceDefinition` resources).
 
 ## Install with Helm
 
-### 1) Add the chart repository
-
-Add the Magos chart repository and fetch the latest index:
-
 ```plaintext
-helm repo add magos https://magosproject.io/charts
-helm repo update
-```
-
-### 2) Install Magos
-
-Install Magos into the `magos` namespace (created automatically if missing):
-
-```plaintext
-helm install magos magos/magos \
-  --namespace magos \
+helm install magos \
+  oci://ghcr.io/magosproject/magos/charts/magos \
+  --namespace magos-system \
   --create-namespace
 ```
 
-### 3) Verify the installation
+The chart creates four controllers in their own Deployments (`workspace`, `project`, `rollout`, `variableset`, `refwatcher`), the `magos-job` ServiceAccount used by runner pods, the API server, the UI, an in-cluster PostgreSQL StatefulSet for run history, and a RustFS (S3-compatible) object store for run logs. The bundled Postgres and RustFS are intended for development and demo clusters; production installs should point both at external services through chart values.
 
-Wait for the workloads to become ready:
+Verify the workloads are ready:
 
 ```plaintext
-kubectl -n magos get pods
+kubectl -n magos-system get pods
 ```
+
+You should see one Pod per controller plus the API, UI, Postgres, and RustFS Pods in the `Running` state.
 
 ## Upgrade
 
-To upgrade an existing installation (or install if it doesn’t exist yet):
-
 ```plaintext
-helm upgrade --install magos magos/magos \
-  --namespace magos
+helm upgrade --install magos \
+  oci://ghcr.io/magosproject/magos/charts/magos \
+  --namespace magos-system
 ```
 
 ## Uninstall
 
-To remove Magos from the cluster:
-
 ```plaintext
-helm uninstall magos --namespace magos
+helm uninstall magos --namespace magos-system
 ```
+
+The chart leaves the `CustomResourceDefinition`s and the runtime data (Postgres volume, RustFS PVC) in place by design, so an accidental uninstall does not destroy your run history. Clean those up explicitly if you want a fresh slate.
 
 ## Configuration
 
-Start from the default values and customize as needed:
+Render the default values to a file, edit, and reinstall:
 
 ```plaintext
-helm show values magos/magos > values.yaml
-```
-
-Apply your configuration by passing the values file:
-
-```plaintext
-helm upgrade --install magos magos/magos \
-  --namespace magos \
+helm show values oci://ghcr.io/magosproject/magos/charts/magos > values.yaml
+helm upgrade --install magos \
+  oci://ghcr.io/magosproject/magos/charts/magos \
+  --namespace magos-system \
   -f values.yaml
 ```
 
-## Accessing Magos
+A few values worth knowing about:
 
-Magos typically exposes a Kubernetes Service. If you’re running it with a ClusterIP service (the default in many charts), you can use port-forwarding for local access:
+- `controllers.<name>.enabled` toggles each controller individually. Useful for local development where you run controllers from your host instead of in-cluster.
+- `policy.kyverno.installCRD` controls whether the chart ships the `policies.kyverno.io/v1` `ValidatingPolicy` CRD itself. Leave it `true` on clusters that do not have Kyverno installed; set it to `false` on clusters that do, so Magos does not collide with Kyverno's own CRD lifecycle.
+- `logs.storage.*` and the bundled Postgres section configure or disable the in-cluster data stores. In production, disable both and point Magos at external Postgres and S3-compatible storage.
+
+## Accessing the UI
+
+The UI is exposed as a `ClusterIP` Service. For local access, port-forward:
 
 ```plaintext
-kubectl -n magos port-forward svc/magos 8080:80
+kubectl -n magos-system port-forward svc/magos-ui 8080:80
 ```
 
-If your chart values expose an ingress or a LoadBalancer service instead, access Magos using the hostname/IP assigned by your cluster.
+Then open `http://localhost:8080`. For production, expose the Service through an `Ingress`, a `Gateway`, or a `LoadBalancer` that fits your platform.
+
+## Next steps
+
+Continue with the [Quickstart](/docs/getting-started/quickstart) to create your first `Project` and `Workspace`.

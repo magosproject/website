@@ -1,0 +1,111 @@
+---
+title: Connecting Git Repositories
+description: Configure Magos Workspaces to clone Terraform modules from public, HTTPS-authenticated, or SSH-authenticated Git repositories.
+---
+
+Every Magos `Workspace` reconciles a Terraform module that lives in Git. The `magos-job` image performs a shallow clone of `spec.source.repoURL` at `spec.source.targetRevision`, checks out the resolved commit, and runs `terraform init` against the directory under `spec.source.path`. This page covers the three supported authentication shapes.
+
+## Public repositories
+
+For a public repository, no credentials are needed. Magos clones over HTTPS without authentication.
+
+```yaml
+spec:
+  source:
+    repoURL: https://github.com/magosproject/demo.git
+    targetRevision: main
+    path: .
+```
+
+The RefWatcher controller polls the remote ref on its interval (default 30 seconds, configurable via the `magosproject.io/git-poll-interval` annotation) and writes the resolved SHA back to the Workspace when the branch moves. A push to `main` results in a fresh plan and apply cycle without operator intervention.
+
+## Private HTTPS repositories
+
+For HTTPS with a personal access token or password, store the credentials in a Kubernetes [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) with a specific label and shape, and let Magos discover it automatically based on the repository URL.
+
+Create the Secret:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-prod-readonly
+  namespace: default
+  labels:
+    magosproject.io/secret-type: repository
+type: Opaque
+stringData:
+  repoURL: https://github.com/your-org/private-infra.git
+  username: git
+  password: ghp_xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Three rules:
+
+- The `magosproject.io/secret-type: repository` label is how the workspace controller finds credential Secrets in the namespace.
+- The `repoURL` data key must match the Workspace's `spec.source.repoURL` exactly. The workspace controller looks up the matching Secret by URL, so multiple Secrets can coexist for different repositories.
+- For HTTPS authentication, set `username` and `password`. With personal access tokens, `username` is typically `git` (or your provider's recommended placeholder) and `password` holds the token.
+
+Then point the Workspace at the same URL:
+
+```yaml
+spec:
+  source:
+    repoURL: https://github.com/your-org/private-infra.git
+    targetRevision: main
+    path: .
+```
+
+The workspace controller injects the username and password into the plan and apply [Pods](https://kubernetes.io/docs/concepts/workloads/pods/) through `valueFrom.secretKeyRef`, so the credentials never traverse the controller process and never appear on the Workspace CR.
+
+## Private SSH repositories
+
+For SSH, the Secret shape is the same except `sshPrivateKey` replaces `username` and `password`:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitlab-prod-readonly
+  namespace: default
+  labels:
+    magosproject.io/secret-type: repository
+type: Opaque
+stringData:
+  repoURL: git@gitlab.com:your-org/private-infra.git
+  sshPrivateKey: |
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    ...
+    -----END OPENSSH PRIVATE KEY-----
+```
+
+Then point the Workspace at the same URL:
+
+```yaml
+spec:
+  source:
+    repoURL: git@gitlab.com:your-org/private-infra.git
+    targetRevision: main
+    path: .
+```
+
+SSH host-key verification is intentionally disabled inside the runner Pod. The Pod is throwaway, there is no persisted `known_hosts` to compare against, and shipping a `known_hosts` bundle inside the image would be brittle. Clusters that need stricter SSH verification should layer that in through the Pod spec (init container, mounted `known_hosts`, custom service account) rather than relying on the runner image.
+
+If a Secret has both `sshPrivateKey` and `username`/`password`, the SSH key wins. This matches the precedence Git itself applies.
+
+## Rotation
+
+Rotating a credential Secret triggers an immediate refresh: the workspace controller watches Secret resources labelled `magosproject.io/secret-type=repository` and re-reconciles every Workspace whose `repoURL` matches the rotated Secret. The next Plan [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/) will pick up the new credentials.
+
+There is no in-controller credential cache to worry about. The kubelet reads the Secret at Pod start, so a rotation that happens between the controller writing the Job spec and the Pod actually scheduling will be picked up on the next Job creation, not silently retained.
+
+## Where credentials live
+
+Magos never copies repository credentials onto a Workspace CR. The credential flow is:
+
+1. The credential lives in a Secret in the same namespace as the Workspace.
+2. The workspace controller refers to that Secret through `valueFrom.secretKeyRef` in the Job spec.
+3. The kubelet resolves the env vars (`GIT_USERNAME`, `GIT_PASSWORD`, or `GIT_SSH_PRIVATE_KEY`) at Pod start.
+4. The `magos-job` binary reads those env vars, hands them to go-git, and exits when the clone is done.
+
+The controller process holds the Secret in its watch cache (because it needs to match `repoURL` to find the right Secret) but never writes credentials to status or logs. The cache for the workspace controller is restricted by label, so only `magosproject.io/secret-type=repository` Secrets are loaded; other Secrets in the namespace (including Variable-Set-referenced ones) are never read by the workspace controller.

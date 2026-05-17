@@ -1,0 +1,146 @@
+---
+title: Rollout Strategies
+description: Practical patterns for labelling Workspaces and structuring Rollout steps for safe promotion.
+---
+
+A `Rollout` is one ordered list of [label selectors](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/). That is a small primitive, but with the right labelling convention it covers most real-world promotion shapes.
+
+This guide is the practical companion to the [Rollouts concept page](/docs/concepts/rollouts). Read that first if you have not yet.
+
+## Pattern: dev → staging → prod
+
+The most common shape: three environments, strict order.
+
+Label each Workspace with its environment:
+
+```yaml
+metadata:
+  labels:
+    env: dev   # or: staging, prod
+```
+
+Rollout:
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Rollout
+metadata:
+  name: payments-platform
+  namespace: default
+spec:
+  projectRef: payments-platform
+  strategy:
+    steps:
+      - name: dev
+        selector:
+          matchLabels:
+            env: dev
+      - name: staging
+        selector:
+          matchLabels:
+            env: staging
+      - name: prod
+        selector:
+          matchLabels:
+            env: prod
+```
+
+A change merged to the source repository triggers a new run on every Workspace, but the Rollout only allows `dev` to execute first. Once `dev` reaches `Applied`, `staging` is allowed, and once `staging` is clean, `prod` follows.
+
+## Pattern: multi-region prod, sequential
+
+A single environment that fans out across regions, promoted region by region.
+
+Label each prod Workspace with its region:
+
+```yaml
+metadata:
+  labels:
+    env: prod
+    region: us-east-1
+```
+
+Rollout:
+
+```yaml
+spec:
+  strategy:
+    steps:
+      - name: us-east-1
+        selector:
+          matchLabels:
+            env: prod
+            region: us-east-1
+      - name: eu-west-1
+        selector:
+          matchLabels:
+            env: prod
+            region: eu-west-1
+      - name: ap-south-1
+        selector:
+          matchLabels:
+            env: prod
+            region: ap-south-1
+```
+
+Each step is a single Workspace; a failure in `us-east-1` freezes the Rollout before `eu-west-1` even gets considered. This is exactly the blast-radius behavior you want for a regional outage caused by a change.
+
+The `cdn-platform` sample in the Magos repository uses this pattern.
+
+## Pattern: parallel within a cohort, sequential across cohorts
+
+A common shape: deploy all dev environments in parallel, then all staging, then all prod.
+
+Label each Workspace with both the cohort and any per-Workspace identifiers:
+
+```yaml
+metadata:
+  labels:
+    env: staging
+    region: us-east-1
+```
+
+The Rollout step matches on the cohort only:
+
+```yaml
+spec:
+  strategy:
+    steps:
+      - name: dev
+        selector:
+          matchLabels:
+            env: dev
+      - name: staging
+        selector:
+          matchLabels:
+            env: staging
+      - name: prod
+        selector:
+          matchLabels:
+            env: prod
+```
+
+Within a step, all matched Workspaces run in parallel, the Rollout controller adds `execution-allowed=true` to all of them at once. The Rollout advances to the next step only when every Workspace in the current cohort reaches `Applied`. This is the cheapest way to get sequential cohorts with intra-cohort parallelism.
+
+## Failure handling
+
+The default policy is "stop on first failure". When a Workspace in the active step reaches `Failed` or `ValidationFailed`, the Rollout halts. Later steps stay in `Pending: AwaitingRollout`. The Workspaces that already succeeded keep their `Applied` state.
+
+To resume the Rollout after a failure:
+
+- Fix the Workspace's underlying issue (bad module, missing variable, broken policy).
+- Either wait for the next periodic reconcile (a fresh plan will run automatically) or set `magosproject.io/reconcile-request: <timestamp>` on the Workspace to request an immediate retry.
+
+When the Workspace reaches `Applied`, the Rollout controller observes the change on its next reconcile and advances to the next step.
+
+If a step's selector matches zero Workspaces, the Rollout enters `phase: Failed` with reason `NoWorkspacesFound`. This is intentional: a typo in a label or selector should never silently skip an environment. Fix the selector or the labels and re-apply.
+
+## Anti-patterns to avoid
+
+- **Cross-Project step.** A Rollout orchestrates exactly one Project. A step's selector still only ever matches Workspaces inside that Project (the Rollout controller filters by `spec.projectRef`).
+- **Reusing labels for unrelated concerns.** Reserve `env` and `region` for orchestration. Keep team, cost-center, owner labels separate so a Rollout selector cannot accidentally match the wrong Workspace.
+- **Putting policy categories on Workspace labels and selecting on them.** Policy selection is a different concern; it lives under `spec.validation.policySelector` on the Workspace or Project, not on Workspace labels.
+
+## When a Rollout is not the right answer
+
+A Rollout enforces strict ordering. If you have many independent Workspaces in the same Project and you genuinely want them to converge in parallel, do not create a Rollout. The Project controller's `DefaultParallel` mode is the right behavior.

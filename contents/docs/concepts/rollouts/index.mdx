@@ -1,0 +1,84 @@
+---
+title: Rollouts
+description: Ordered, label-driven orchestration that grants execution permission across a sequence of Workspaces.
+---
+
+A `Rollout` is a namespaced Kubernetes resource that controls when Workspaces inside a single Project are allowed to execute. It binds 1-to-1 to a Project (the `Rollout` name must equal the Project name, enforced by CEL) and declares an ordered list of steps. Each step selects a cohort of Workspaces by Kubernetes [label selector](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/). Workspaces in step 0 are granted execution permission first; once all of them reach `Applied`, the Rollout advances to step 1; and so on.
+
+A Rollout does not run Terraform. It is a state machine over a single boolean, the `magosproject.io/execution-allowed` annotation on each member Workspace, and the Workspace controller does the actual execution.
+
+## When to use a Rollout
+
+If your environments must converge in a strict order (`dev` before `staging` before `prod`), use a Rollout. If they can converge in parallel, do not. In the absence of a Rollout, the Project controller falls back to `DefaultParallel` and grants execution permission to every member Workspace at once.
+
+A Rollout is also the right surface for cross-region promotion: each step can match a region label, and a failure in one region freezes the rollout before later regions get touched.
+
+## Anatomy
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Rollout
+metadata:
+  name: payments-platform
+  namespace: default
+spec:
+  projectRef: payments-platform
+  strategy:
+    steps:
+      - name: dev
+        selector:
+          matchLabels:
+            env: dev
+      - name: staging
+        selector:
+          matchLabels:
+            env: staging
+      - name: prod
+        selector:
+          matchLabels:
+            env: prod
+```
+
+What the fields do:
+
+- `spec.projectRef` is the Project name this Rollout orchestrates. The Rollout name must match exactly; the API server rejects a mismatch.
+- `spec.strategy.steps` is an ordered list. Each step has a `name` (free-form, used in status and metrics) and a `selector` (`matchLabels` or `matchExpressions`, the same selector syntax Kubernetes uses everywhere).
+
+## How a Rollout drives execution
+
+The Rollout controller maintains `status.currentStep` as the index of the step it is currently executing. At each reconcile, it:
+
+1. Reads `status.currentStep`. Lists Workspaces in the namespace whose `spec.projectRef.name` matches, then filters by the current step's `selector`.
+2. For each matched Workspace, adds `magosproject.io/execution-allowed=true` if it is not already set. That is the signal the workspace controller waits for before creating a Plan [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/).
+3. Waits for every Workspace in the cohort to reach `Applied`.
+4. Advances `status.currentStep` to the next step. Workspaces from the previous step lose their `execution-allowed` annotation; future reconcile cycles for those Workspaces will be gated until the Rollout reaches them again.
+
+If the selector for a step matches zero Workspaces, the Rollout enters `phase: Failed` with reason `NoWorkspacesFound`. This is deliberate: a typo in a selector should not silently skip a step.
+
+If any Workspace in the current cohort reaches `Failed` or `ValidationFailed`, the Rollout halts progression. The default failure policy is "stop on first failure"; richer policies (continue, retry, pause for approval) are on the roadmap.
+
+## Project + Rollout handshake
+
+The Project controller and the Rollout controller share one signal: the `magosproject.io/execution-allowed` annotation on each Workspace. The handshake works like this:
+
+- If no Rollout of the same name as the Project exists, the Project controller is the orchestrator. It adds the annotation to every member Workspace (`DefaultParallel`).
+- If a Rollout of the same name exists, the Project controller backs off: it sets `status.reason=ManagedByRollout` and stops managing the annotation. The Rollout controller is now in charge.
+
+The 1-to-1 name binding makes the handshake unambiguous. There is exactly one Rollout per Project, or zero.
+
+## Failure semantics
+
+A Rollout halts on the first failed Workspace inside the active step. The Workspaces that already succeeded in earlier steps keep their `Applied` state; the Workspaces in later, not-yet-reached steps remain in `Pending` with reason `AwaitingRollout`. This is what bounds the blast radius: a broken `staging` plan never gets the chance to break `prod`.
+
+To recover, fix the underlying issue (the Workspace's spec, the Terraform module, a missing variable) and either:
+
+- Wait for the next reconcile cycle, which retries the failed Plan Job, or
+- Set `magosproject.io/reconcile-request` to a unique value on the failed Workspace to request an immediate retry.
+
+## What a Rollout is not
+
+- **Not a workflow engine.** Rollouts are an ordered list of cohorts, not a DAG. Within a step, Workspaces converge in parallel. Between steps, they converge sequentially.
+- **Not a Terraform runner.** It never creates a Job and never invokes `terraform`. It only manages a single annotation per Workspace.
+- **Not cross-Project.** A Rollout orchestrates exactly one Project. If you have many Projects and want a cross-cutting promotion model, you currently run one Rollout per Project. A cross-Project orchestration story is on the roadmap.
+
+See [Guides → Rollout Strategies](/docs/guides/rollout-strategies) for concrete patterns and label conventions.

@@ -1,0 +1,64 @@
+---
+title: Observability
+description: Prometheus metrics, structured run logs, and the data behind the Magos UI.
+---
+
+Magos exposes operations data through three surfaces: a Prometheus endpoint on each controller, an archive of gzipped run logs in S3-compatible object storage, and a structured run history in PostgreSQL queryable through the API server. The UI is a presentation layer over the latter two.
+
+## Prometheus metrics
+
+Each controller exposes a `/metrics` endpoint via the controller-runtime metrics server. Enable scraping by setting `metricsService.enabled=true` in chart values; the chart wires the appropriate `ServiceMonitor` shape for Prometheus Operator users.
+
+Metrics emitted by Magos:
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `workspace_reconcile_total` | counter | `namespace`, `name`, `result` | Workspace reconciliations, partitioned by `success` or `error`. Page on a sustained `error` rate for a specific Workspace. |
+| `workspace_phase_transitions_total` | counter | `namespace`, `name`, `phase` | Increments each time a Workspace moves to a new phase. Useful for plotting fleet phase distributions. |
+| `workspace_job_duration_seconds` | histogram | `namespace`, `name`, `phase` | Wall time per plan/apply [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/). Use for SLO tracking on Terraform throughput. |
+| `workspace_active_count` | gauge |  | Current count of Workspaces in `Planning` or `Applying`. A capacity signal. |
+| `project_reconcile_total` | counter | `namespace`, `name`, `result` | Project controller reconciliations. |
+| `project_workspace_count` | gauge | `namespace`, `name` | Member Workspaces per Project. Spot orphaned Projects. |
+| `project_managed_by_rollout` | gauge | `namespace`, `name` | `1` when a Rollout owns this Project's orchestration, `0` when in `DefaultParallel`. |
+| `rollout_reconcile_total` | counter | `namespace`, `name`, `result` | Rollout controller reconciliations. |
+| `rollout_current_level` | gauge | `namespace`, `name` | `status.currentStep` exposed as a gauge for dashboards. |
+| `rollout_level_transitions_total` | counter | `namespace`, `name`, `from`, `to` | Step advancements. Useful for promotion-velocity dashboards. |
+| `rollout_active_count` | gauge |  | Current count of Rollouts not yet at their final step. |
+| `variableset_reconcile_total` | counter | `namespace`, `name`, `result` | VariableSet controller reconciliations. |
+| `variableset_unresolved_references` | gauge | `namespace`, `name` | Size of `status.unresolvedReferences`. Page when non-zero. |
+| `refwatcher_poll_total` | counter | `result` | Git ref polls, partitioned by `success`, `error`, or `skipped`. |
+| `refwatcher_poll_duration_seconds` | histogram |  | Latency of a single remote ref poll. |
+| `refwatcher_registry_size` | gauge |  | Number of Workspaces the RefWatcher is currently polling. |
+| `refwatcher_worker_queue_depth` | gauge |  | Backlog of pending poll work. Sustained non-zero values indicate the worker pool is undersized. |
+
+Standard controller-runtime metrics (`controller_runtime_reconcile_total`, `workqueue_depth`, etc.) are also exposed per controller. They follow the upstream conventions and are useful for diagnosing controller-level slowness independently of any single Workspace.
+
+## Run logs
+
+Every plan and apply [Pod](https://kubernetes.io/docs/concepts/workloads/pods/) produces an unstructured log. The workspace controller archives those logs as gzipped objects in the configured S3-compatible bucket, keyed by namespace, Workspace, run ID, and phase. The archive is independent of Pod lifetime: once a Pod is garbage-collected, its logs are still retrievable for as long as the bucket retains them.
+
+The bundled `RustFS` instance is suitable for development. Production installs should configure `logs.storage.*` to point at managed storage (S3, GCS, MinIO). The protocol is S3-compatible; whichever backend you choose, the runner controllers and the API server both reach it the same way.
+
+Logs are surfaced through the API server's run-log SSE endpoint and rendered in the UI on the Workspace run history page. They are also queryable directly from the bucket if you prefer to ship them to your existing log platform.
+
+## Run history (PostgreSQL)
+
+In parallel with the gzipped logs, the workspace controller writes a structured row per phase to PostgreSQL: which Workspace, which run, which phase, start time, end time, exit code, and the object-store key for the corresponding log archive. The API server queries this table to power the UI's run history view, and external consumers can read the same data through the API server's REST endpoints.
+
+The bundled in-cluster Postgres is intended for development. Production installs typically point Magos at managed Postgres through chart values. The schema is owned by Magos and migrations are applied automatically at API server startup.
+
+## UI
+
+The UI is a React Router 7 SSR app that renders the Magos CRDs plus the run history. It is a thin presentation layer over the API server and the controller-runtime caches; everything it shows is available through `kubectl` and the API server's REST/SSE endpoints. Use the UI for incident response and human inspection; use Prometheus and the API for automation.
+
+## Alerting recommendations
+
+A short list of alerts worth wiring up on day one:
+
+- **Workspace reconcile error rate.** `rate(workspace_reconcile_total{result="error"}[5m])` over zero for more than a few minutes on a specific Workspace.
+- **Stuck in Planning or Applying.** Workspace phase has not changed in over the configured Job timeout (default 24 hours). The `workspace_phase_transitions_total` counter combined with `time()` produces this signal.
+- **VariableSet unresolved.** `variableset_unresolved_references > 0` for any VariableSet, sustained beyond a reconcile interval.
+- **Rollout stuck.** `rollout_current_level` unchanged for longer than the typical step duration, while at least one Workspace in the current cohort is in `Pending` or `Failed`.
+- **RefWatcher backlog.** `refwatcher_worker_queue_depth > 0` sustained, which means polls are queueing faster than the worker pool can drain them.
+
+These are the same signals the project's reference dashboards key off; see the Magos GitHub for the Grafana JSON.

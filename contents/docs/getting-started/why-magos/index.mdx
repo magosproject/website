@@ -1,6 +1,51 @@
 ---
 title: Why Magos?
-description: Why we created Magos and how it differs from existing solutions.
+description: Where Magos fits relative to existing Terraform delivery tools, and the trade-offs the project deliberately makes.
 ---
 
-## Foobar
+Terraform itself has aged remarkably well. The delivery layer around it has not. Most teams that run Terraform at any meaningful scale end up with one of three patterns: a CI pipeline that runs `terraform apply` on a merge to main, a queue of shell scripts running on a long-lived runner, or a SaaS that hosts the runners for you in exchange for a per-resource bill. Each of these works, and each of them stops working in a particular way the moment the surrounding system gets more complicated than a single repository and a single team.
+
+Magos exists because the application delivery layer figured this out a decade ago, and the infrastructure layer never caught up.
+
+## What Magos replaces
+
+Most platform teams reach for one of the following to drive Terraform:
+
+- **CI-driven apply**, where a pipeline runs `terraform apply` on push. This couples the audit trail to your CI system, splinters secrets across pipelines, and gives operators no consistent way to ask "what state is this module in right now?" outside of reading CI logs.
+- **Shared runner with a queue**, where Atlantis or a homegrown wrapper holds a pool of long-lived runners. This recovers a queue and a UI but reintroduces a single shared trust boundary: every Workspace runs as the same user, on the same volume, with the same credentials in memory.
+- **Hosted SaaS**, where a third party runs the runners. This solves the operations problem but introduces a per-resource billing model and a hard dependency on a vendor whose interests do not always align with yours.
+
+Magos picks none of these. It models Terraform delivery as a reconciliation problem that belongs inside Kubernetes, and lets the cluster itself supply the audit trail, the [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/), the secret store, the scheduler, and the failure semantics.
+
+## What Magos is
+
+Magos is a Kubernetes operator. It introduces four [custom resources](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/), `Project`, `Workspace`, `Rollout`, `VariableSet`, and a set of controllers that reconcile them into short-lived Kubernetes [Jobs](https://kubernetes.io/docs/concepts/workloads/controllers/job/) that run `terraform plan` and `terraform apply`.
+
+The execution model has a small number of deliberate properties:
+
+- **One pod per phase.** Each plan and each apply runs in its own pod, scheduled by the cluster, with its own service account. There is no shared runner, no persistent shell, and no place where credentials from one Workspace can leak into another.
+- **No central executor.** The controllers create Jobs; the kubelet runs them. Apply throughput is bounded by your cluster's scheduler, not by a runner pool you have to size and patch yourself.
+- **Plan-time policy.** Before `terraform apply` runs, the plan JSON can be evaluated against Kyverno `ValidatingPolicy` resources. A non-compliant change is rejected at the plan boundary, not after it has touched cloud APIs.
+- **GitOps inputs.** Sources, revisions, variables, and policy selectors are all declarative Kubernetes objects. The desired state of your infrastructure is whatever your `kubectl apply` produces, and the controllers reconcile to it.
+
+The mental model is intentionally familiar: if you understand how Argo CD reconciles Deployments from a Git source, you understand how Magos reconciles Terraform from a Git source.
+
+## Trade-offs
+
+A few things Magos deliberately does not do:
+
+- **No Terraform fork.** Magos drives stock `terraform` (and OpenTofu where the binary is compatible). It does not replace the CLI, the state file format, or the provider ecosystem.
+- **No bundled state backend.** State lives where you point it: S3, GCS, Terraform Cloud, an in-cluster backend, whatever the module configures. Magos does not store state for you.
+- **No long-lived shell.** Every plan and apply happens in a throwaway pod. If you have a workflow that depends on persistent runner state between runs, that does not exist here.
+- **No commercial tier.** There is no enterprise edition, no per-resource pricing, no hosted offering. The project is community-led and will remain so.
+
+## When Magos is the right answer
+
+You will get the most out of Magos if your environment already looks like this:
+
+- You run Kubernetes for production workloads and you trust it as a control plane.
+- You write Terraform that produces real cloud or on-prem infrastructure.
+- You want the same review, RBAC, and audit story for infrastructure changes that you already have for application changes.
+- You care about the blast radius of a leaked credential or a runaway runner, and you prefer "one pod per phase" to "one shared runner forever".
+
+If those describe you, Magos is the missing layer between your Kubernetes cluster and your Terraform modules. The rest of the documentation assumes you fit that profile.

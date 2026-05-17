@@ -1,0 +1,55 @@
+---
+title: Contributing
+description: How to engage with the Magos project, file issues, and propose changes.
+---
+
+Magos is built in the open, by practitioners, for practitioners. Contributions are welcome from anyone who shares the project's principles around reliability, security, and community ownership.
+
+## File an issue or RFC first
+
+We prioritise proposals over pull requests for non-trivial changes. Before writing code that touches the controller surface, the CRD shape, or the runner-pod contract, open an issue or RFC on the GitHub repository describing:
+
+- The use case you are trying to support.
+- The shape of the change you are proposing.
+- The trade-offs you see, and which ones we are accepting.
+
+This is not about gatekeeping. It is about catching design conversations early, before a contributor invests in code that we will not be able to accept without significant rework. We aim to respond to RFCs within a few days; if a topic does not get traction, that is usually a signal that the proposal needs more context, not that we have lost interest.
+
+## Local development
+
+The repository's `Makefile` documents the development loop. The short version:
+
+```bash
+make kind-cluster   # creates the 'magos-test' Kind cluster with port mappings
+make install        # applies the CRDs and renders the local chart
+make kind-load      # builds and loads the controller, job, API, and UI images
+make run            # runs the controller, API, and UI from your host against the cluster
+```
+
+`make test` runs unit tests with `setup-envtest`. `make test-chainsaw` runs the chainsaw acceptance suite (no Helm install needed for most tests). `make lint` runs `golangci-lint` v2.
+
+The repository's `CLAUDE.md` describes the codebase layout, the codegen pipeline, and the architectural exceptions worth knowing about before you touch a controller.
+
+## Code review
+
+We are uncompromising about the project's design principles: per-Workspace isolation, no central executor, no commercial agenda. We will reject changes that erode those properties even when the implementation is clever. If you are not sure whether your idea aligns, an RFC is the cheapest way to find out.
+
+For changes that do align, we look for:
+
+- A unit test or chainsaw test that pins the new behavior down.
+- Clear commit messages and a small, focused PR that does one thing.
+- Documentation updates in this website where user-facing surfaces change.
+
+## Governance
+
+Magos is steered by a neutral committee made up of contributors who have demonstrated sustained engagement with the project. We are working toward applying to the Cloud Native Computing Foundation so the project remains a public good independent of any single company. There is no commercial tier, no enterprise edition, and no plan to introduce one.
+
+Contributors with sustained engagement can join the project's maintainer team. The criteria are practical: ongoing code or documentation contributions, thoughtful engagement in design discussions, and demonstrated alignment with the project's principles.
+
+## Community
+
+- GitHub: [github.com/magosproject/magos](https://github.com/magosproject/magos)
+- Issue tracker: GitHub Issues on the same repository.
+- Discussions and RFCs: GitHub Discussions on the same repository.
+
+If you want to talk before opening an issue, the GitHub Discussions tab is the right place to start.

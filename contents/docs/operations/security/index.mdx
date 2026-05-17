@@ -1,0 +1,66 @@
+---
+title: Security and RBAC
+description: The Magos isolation model, ServiceAccount conventions, and required cluster permissions.
+---
+
+Magos operates strictly on standard Kubernetes [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/). By utilizing isolated runner pods for every Workspace, the blast radius of any infrastructure failure or credential exposure is strictly minimized. This page describes the model in detail so you can decide whether it fits your threat model, and so you know what to audit in production.
+
+## The isolation model
+
+Every plan and every apply runs in its own Kubernetes [Pod](https://kubernetes.io/docs/concepts/workloads/pods/), scheduled by the cluster, with its own [ServiceAccount](https://kubernetes.io/docs/concepts/security/service-accounts/) and its own per-Workspace [PersistentVolumeClaim](https://kubernetes.io/docs/concepts/storage/persistent-volumes/). There is no shared runner, no persistent shell, and no place where credentials from one Workspace can leak into another.
+
+The concrete properties:
+
+- **One Pod per phase.** A Workspace's `Planning` phase is one [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/); its `Applying` phase is a separate Job. Neither Pod survives past the phase it ran.
+- **Per-Workspace PVC.** Each Workspace owns a `<workspace-name>-data` PVC, mounted at `/workspace-data` in its Pods. The plan file produced by the plan phase reaches the apply phase via this PVC; two Workspaces never share storage.
+- **No shared executor.** Apply throughput is bounded by the cluster scheduler. There is no controller process holding a long-lived `terraform` session, and no shared runner pool to size or patch.
+- **No controller-side variable resolution.** [Secret](https://kubernetes.io/docs/concepts/configuration/secret/)-backed variables flow through `valueFrom.secretKeyRef` on the Pod env. The kubelet performs the read at Pod start; the controller process never holds the resolved bytes.
+
+The result is that compromising a single runner Pod gives an attacker access to one module's clone, one module's resolved variables, and one Workspace's PVC. It does not give them access to other Workspaces, the controller process, or unrelated Secrets in the namespace.
+
+## ServiceAccounts
+
+Three ServiceAccounts matter:
+
+- **`magos-job`** (release namespace, created by the chart): the default ServiceAccount for plan and apply Pods. Has `get/list/watch` on `validatingpolicies.policies.kyverno.io` so the runner Pod can fetch matching policies at run time. Override per Workspace via `spec.serviceAccountName` (for example to bind a Workload Identity or an IRSA annotation); the replacement must carry the same Kyverno RBAC if you use policy validation.
+- **`magos-<controller>`** (one per controller, in the release namespace): the ServiceAccounts the controllers themselves run as. Bound to the cluster `ClusterRole` that grants the Magos CRD verbs and the auxiliary permissions each controller needs.
+- **`magos-api`** (release namespace): the ServiceAccount the API server runs as. Has read-only access to the Magos CRDs plus access to the run log store. Never executes Terraform.
+
+The chart wires all four through `cluster-rbac.yaml`, `serviceaccount.yaml`, and `clusterrolebinding.yaml`. If you do not need the API or UI, disable them through chart values; the ServiceAccounts are only created when their respective controllers are enabled.
+
+## Cluster permissions
+
+The controllers need a small, well-defined set of cluster-scoped permissions:
+
+- `get/list/watch/create/update/patch/delete` on every Magos CRD (`projects`, `workspaces`, `rollouts`, `variablesets`) and their `/status` and `/finalizers` subresources.
+- `get/list/watch` on `policies.kyverno.io/v1` `ValidatingPolicy` (so the workspace controller can list policy resources at admission time for status reporting).
+- `get/list/watch` on Secret (filtered by label to repository credentials; non-credential Secrets are not loaded into the workspace controller cache).
+- `get/list/watch` on [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/) (used by the variableset controller for metadata only).
+- `get/list/watch/create/update/patch/delete` on `batch/Job` and PersistentVolumeClaim (the workspace controller creates and garbage-collects these).
+- `get/list/watch` on Pod and `get` on `pods/log` (so the workspace controller can read structured `MAGOS_RESULT:` lines from plan Pod logs and surface policy violations).
+- `create/patch` on `events` (for emitting Kubernetes events).
+
+That is it. Magos does not need cluster-admin, does not need to read or write resources outside its own CRDs and its own Pods, and never grants the runner ServiceAccount permission to touch the cluster API. The runner Pod's only inbound permission is the Kyverno policy read needed for plan-time validation.
+
+## Secret handling
+
+Repository credentials and Variable-Set-referenced Secrets follow two slightly different paths, both designed to minimise the controller's exposure to the bytes:
+
+- **Repository credentials** live in a Secret labelled `magosproject.io/secret-type=repository`. The workspace controller's cache is restricted by that label, so only credential Secrets are held in memory; every other Secret in the namespace is invisible to the controller. The credentials are injected into the runner Pod through `valueFrom.secretKeyRef`, so the kubelet does the read at Pod start.
+- **Variable-Set-referenced Secrets** are read by the kubelet exactly the same way. The variableset controller's only interaction with them is to validate that the referenced key exists, which requires loading the Secret into the controller cache (the cost of that key-existence validation). The resolved value is never written to a CR, never written to status, and never logged.
+
+There is no central credential store, no Magos-managed Secret sync, and no inter-namespace credential reach. Bring your own Secrets through your existing Secret manager (External Secrets Operator, Sealed Secrets, Vault Secrets Operator, hand-rolled `kubectl create secret`).
+
+## Threat-model assumptions
+
+A few assumptions we deliberately make and you should verify in your environment:
+
+- The cluster's kubelet is trusted to deliver `valueFrom` env vars correctly. If your kubelet is compromised, every secret in the cluster is exposed; Magos cannot improve on that.
+- The Magos controller process is trusted within its own namespace. If you can read its memory, you can read whatever Secrets it has cached. The cache restrictions described above (label-filtered for repository Secrets; metadata-only for Variable-Set-referenced ones) shrink the blast radius but do not eliminate the class.
+- The runner Pod's Git auth is responsible for repository confidentiality. SSH host-key verification inside the runner is deliberately disabled (the Pod is throwaway and has no persisted `known_hosts`). Clusters that need stricter SSH verification layer that in through the Pod spec.
+
+## Audit
+
+Plan and apply Pods produce structured logs that the workspace controller archives, gzipped, to the configured S3-compatible bucket. Each archive is indexed by Workspace, run ID, and phase. The same run history is written to PostgreSQL and queryable through the API server. This is the audit surface for "what was applied, by whom, against which commit, with which variables", and it survives Pod deletion.
+
+For change attribution beyond the run record, lean on the upstream Git provider's audit log (who pushed which commit) and your Kubernetes audit log (who applied which Magos CR). Magos itself does not invent a separate user model.

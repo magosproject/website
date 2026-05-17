@@ -1,0 +1,80 @@
+---
+title: Projects
+description: The logical boundary that groups Workspaces and supplies shared inputs.
+---
+
+A `Project` is a namespaced Kubernetes resource that defines a logical boundary for a set of related Workspaces. It is the place where you attach shared variables, set a default plan-time policy selector, and bind a `Rollout` for ordered execution.
+
+A Project does not execute Terraform. It is a grouping and configuration layer; all execution lives in the Workspaces it groups.
+
+## What a Project does
+
+The Project controller has two responsibilities:
+
+1. **Orchestration mode selection.** If a `Rollout` of the same name exists in the same namespace, the Project sets `status.reason=ManagedByRollout` and defers all execution decisions to the Rollout controller. If no Rollout exists, the Project enters `DefaultParallel` mode and grants execution permission to every member Workspace by adding the `magosproject.io/execution-allowed=true` annotation.
+2. **Default propagation.** A Project can declare a default `validation.policySelector` and a list of `variableSetRef` entries. Member Workspaces inherit both unless they explicitly override.
+
+Workspaces declare their Project membership through `spec.projectRef.name`. The relationship is by-name, namespaced, and unidirectional: a Workspace knows its Project; a Project does not maintain a list of Workspace pointers.
+
+## Minimal Project
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Project
+metadata:
+  name: networking
+  namespace: default
+spec:
+  description: Cloud Networking Platform
+```
+
+That is enough. A Workspace whose `spec.projectRef.name` is `networking` will be granted execution permission by the Project controller as soon as no overriding Rollout exists.
+
+## A Project with shared variables and a default policy
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Project
+metadata:
+  name: payments-platform
+  namespace: default
+spec:
+  description: Payments Platform
+  variableSetRef:
+    - name: aws-shared
+    - name: payments-defaults
+  validation:
+    policySelector:
+      matchExpressions:
+        - key: policy.magosproject.io/category
+          operator: In
+          values:
+            - compliance
+```
+
+Here, every Workspace that joins this Project automatically inherits two `VariableSet`s (`aws-shared` and `payments-defaults`) and is gated by every `ValidatingPolicy` labelled `policy.magosproject.io/category=compliance`. A Workspace that needs a different policy set can declare its own `spec.validation`; a Workspace-level `validation` block fully overrides the Project default rather than merging with it.
+
+## Lifecycle
+
+The Project controller reaches `Ready` as soon as it has decided which orchestration mode to use. `status.phase` is `Ready` and `status.reason` is either:
+
+- `DefaultParallel`: no matching Rollout, every member Workspace is auto-granted execution permission, or
+- `ManagedByRollout`: a Rollout of the same name exists, orchestration is delegated to it.
+
+Both are healthy. The reason field is the operator-facing signal for which mode is active.
+
+## Deletion
+
+Projects do not own infrastructure directly. Deleting a Project removes the resource, but the Workspaces that referenced it remain. Those Workspaces will reach `Pending` with reason `AwaitingRollout` because no Project is around to grant `DefaultParallel`, which is the correct conservative default: a Workspace whose Project has gone away should not keep executing.
+
+To fully tear down, delete the Workspaces first, then the Project.
+
+## What a Project is not
+
+A few things a Project deliberately does not do:
+
+- **It does not execute Terraform.** Only Workspaces do. The Project controller never creates a [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/).
+- **It does not store state.** Variable values are not held on the Project; only references to `VariableSet`s are.
+- **It does not enforce a namespace boundary.** Magos is namespaced; cross-namespace references are not supported. If you need separation, use Kubernetes namespaces and [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/).
+
+See [Workspaces](/docs/concepts/workspaces) for the execution layer, [Variable Sets](/docs/concepts/variable-sets) for how shared inputs flow into Workspaces, and [Rollouts](/docs/concepts/rollouts) for ordered orchestration.
