@@ -1,0 +1,92 @@
+---
+title: Workspaces
+description: The unit of Terraform execution. One Workspace, one module, one environment.
+---
+
+A `Workspace` is a namespaced Kubernetes resource that represents a single Terraform module reconciled by Magos. Each Workspace points at one Git source, declares one Terraform version, and is reconciled by the workspace controller into Plan and Apply [Jobs](https://kubernetes.io/docs/concepts/workloads/controllers/job/) that run in their own pods.
+
+Workspaces are passive executors. They do not coordinate with each other, they have no notion of sibling environments, and they only run when an orchestrator (Project or Rollout) grants execution permission.
+
+## Minimal Workspace
+
+```yaml
+apiVersion: magosproject.io/v1alpha1
+kind: Workspace
+metadata:
+  name: vpc-dev
+  namespace: default
+  labels:
+    env: dev
+spec:
+  projectRef:
+    name: networking
+  source:
+    repoURL: https://github.com/magosproject/demo.git
+    targetRevision: main
+    path: .
+  terraform:
+    version: "1.14.8"
+```
+
+What the fields do:
+
+- `projectRef.name` binds the Workspace to a `Project` in the same namespace.
+- `source` describes the Git module: repository URL, branch/tag/commit, and the path to run Terraform in.
+- `terraform.version` selects which Terraform binary the runner pod installs. OpenTofu binaries with matching CLI flags are also accepted; the field is named `terraform.version` for clarity.
+- `metadata.labels` are how `Rollout` selectors match this Workspace.
+
+## Source revisions
+
+`source.targetRevision` accepts anything Git can resolve: a branch name, a tag, or a full commit SHA. When it is a branch or tag, the RefWatcher controller polls the remote on its interval and writes the resolved SHA back to the Workspace as the `magosproject.io/detected-revision` annotation. The workspace controller treats annotation changes as a trigger for a fresh reconcile, so a push to `main` automatically results in a new plan and apply cycle without operator intervention.
+
+`status.observedRevision` is always the actual commit SHA that was applied. That is the field you key off in alerts and dashboards.
+
+## Variables
+
+A Workspace receives Terraform inputs in three ways, in increasing precedence:
+
+1. `spec.terraform.tfvarsPath`: a path inside the Git source pointing at a `.tfvars` file.
+2. Project-level `variableSetRef`: a list of `VariableSet`s attached to the parent Project, applied in declaration order.
+3. Workspace-level `variableSetRef`: a list of `VariableSet`s attached directly to this Workspace, applied after the Project's.
+
+Within the combined list of Variable Sets, later entries shadow earlier ones on conflicting variable names. The whole composition reaches Terraform as `TF_VAR_<name>` environment variables on the Plan and Apply pods, which means it overrides any matching variable defined in `tfvarsPath`. See [Variable Sets](/docs/concepts/variable-sets) for the full rules and the precedence-with-secrets discussion.
+
+## Phases
+
+Every Workspace progresses through a small state machine. The `status.phase` field surfaces the current state:
+
+- `Pending`: waiting on orchestration to grant execution permission, or in a reset window between runs.
+- `Planning`: a Plan Job has been created and is running `terraform plan`.
+- `Planned`: the plan succeeded; the Workspace is either auto-applying or waiting for approval.
+- `Applying`: an Apply Job has been created and is running `terraform apply` against the previous plan file.
+- `Applied`: the run completed successfully. The Workspace stays here until the next reconcile interval, a new revision is detected, or a manual reconcile is requested.
+- `Failed`: a Job failed, or a controller error prevented progress.
+- `ValidationFailed`: the plan violated a `ValidatingPolicy` rule; apply was skipped.
+
+`status.reason` is a CamelCase code (`PlanSucceeded`, `ApplyFailed`, `AwaitingRollout`, `PolicyViolation`, ...) suitable for keying alerts off. `status.message` is human-readable.
+
+## AutoApply and approval
+
+By default `spec.autoApply` is `true`: a successful plan immediately produces an Apply Job. Set it to `false` to require explicit approval between plan and apply. In that mode, the Workspace stays in `Planned` until Magos applies the approval, at which point the workspace controller picks it up and proceeds.
+
+A full approval workflow (per-environment reviewers, multi-step gates, attestations) is on the roadmap.
+
+## Drift detection and reconcile interval
+
+A successful `Applied` Workspace is not idle forever. The workspace controller schedules a fresh reconcile at a configurable interval (`magosproject.io/reconcile-interval` annotation, default three minutes). The scheduled reconcile re-plans the module to detect drift; if the new plan is empty, the Workspace returns to `Applied` without producing an Apply Job. If the plan has changes, it proceeds through the normal cycle.
+
+This is how Magos catches drift caused by manual cloud-console edits, expired credentials, or external mutations to the underlying provider.
+
+## Per-Workspace storage and isolation
+
+For each Workspace, the controller creates a [PersistentVolumeClaim](https://kubernetes.io/docs/concepts/storage/persistent-volumes/) named `<workspace-name>-data`. The PVC is mounted into both Plan and Apply [Pods](https://kubernetes.io/docs/concepts/workloads/pods/) at `/workspace-data`, which is how the binary plan file produced by the plan phase reaches the apply phase. The PVC is owned by the Workspace via an [owner reference](https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/), so deleting the Workspace garbage-collects it.
+
+Two Workspaces never share a PVC. There is no shared filesystem across runs of different Workspaces, no shared provider cache, and no shared credentials store. Provider plugins are cached at `/workspace-data/plugin-cache` inside the PVC, which keeps re-init fast within a single Workspace without leaking across Workspaces.
+
+## What a Workspace is not
+
+- **A Terraform state backend.** State lives wherever the module's `backend` block puts it.
+- **A coordinator.** A Workspace has no concept of its siblings. If you need ordering, use a `Rollout`.
+- **A long-running process.** Each phase is one Job. There is no controller-side `terraform` shell holding open.
+
+See [Architecture](/docs/concepts/architecture) for how Workspaces relate to the rest of the controller fleet, and [Variable Sets](/docs/concepts/variable-sets) for the full variable composition story.

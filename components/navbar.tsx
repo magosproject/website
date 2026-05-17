@@ -12,7 +12,7 @@ import { ModeToggle } from "./theme-toggle";
 export const NAVLINKS = [
   {
     title: "Getting Started",
-    href: "/getting-started",
+    href: "/docs/getting-started/quickstart",
   },
   {
     title: "Documentation",

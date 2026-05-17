@@ -1,0 +1,52 @@
+---
+title: Annotations
+description: Annotations the Magos controllers honor on Workspace, Project, and credential Secret resources.
+---
+
+Magos uses annotations for runtime signals that should not be part of the desired-state spec: manual reconcile requests, approval grants, drift-detection cadence overrides, and inter-controller handoffs.
+
+## Workspace annotations
+
+| Annotation | Value | Set by | Read by | Effect |
+| --- | --- | --- | --- | --- |
+| `magosproject.io/finalizer` | `magosproject.io/finalizer` | Workspace controller | Workspace controller | Guarantees `handleDeletion` runs before the object is reaped. |
+| `magosproject.io/execution-allowed` | `"true"` | Project or Rollout controller | Workspace controller | Authorises the Workspace to start a plan or apply Job. |
+| `magosproject.io/approved` | any non-empty string | Operator | Workspace controller | When `spec.autoApply: false`, releases a `Planned` Workspace into the apply phase. |
+| `magosproject.io/reconcile-request` | any unique string (timestamp recommended) | Operator | Workspace controller | One-shot manual trigger for a fresh plan and apply run. Consumed and cleared by the controller. |
+| `magosproject.io/reconcile-interval` | Go duration (e.g. `5m`, `1h`) | Operator | Workspace controller | Overrides the default 3-minute drift-detection interval for this Workspace. |
+| `magosproject.io/detected-revision` | Git commit SHA | RefWatcher controller | Workspace controller | Signals that the RefWatcher resolved `spec.source.targetRevision` to a new commit. Triggers a fresh run; the workspace controller consumes the annotation after a successful apply. |
+| `magosproject.io/git-poll-interval` | Go duration | Operator | RefWatcher controller | Overrides the default 30-second git poll interval for this Workspace. |
+| `magosproject.io/tf-log-level` | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR` | Operator | Workspace controller | Sets `TF_LOG` on the plan and apply Pods. Useful for debugging Terraform behavior; remove the annotation to disable logging again. Changes do not trigger a new run on their own. |
+
+## Project annotations
+
+The Project controller does not honor any Project-specific annotations today. It reads Workspace annotations (specifically `magosproject.io/execution-allowed`, see above) as part of its orchestration loop.
+
+## Credential Secret labels
+
+Repository credential Secrets are discovered by label, not annotation:
+
+| Label | Value | Required | Description |
+| --- | --- | --- | --- |
+| `magosproject.io/secret-type` | `repository` | yes | Marks the Secret as a Magos repository credential. The workspace controller's cache is restricted to this label. |
+
+The Secret's `data` map must include `repoURL` (matching `spec.source.repoURL` of the consuming Workspace) and one of:
+
+- `username` + `password` for HTTPS authentication, or
+- `sshPrivateKey` for SSH authentication.
+
+See [Guides → Connecting Git Repositories](/docs/guides/git) for full examples.
+
+## ValidatingPolicy labels
+
+`ValidatingPolicy` resources targeted by Magos are selected via `Project.spec.validation.policySelector` or `Workspace.spec.validation.policySelector`. A common convention is to label policies by compliance framework, owning team, and enforcement mode so Projects can opt in to the slice that applies to them:
+
+```yaml
+metadata:
+  labels:
+    compliance: pci-dss
+    owner: cloud-security
+    enforcement: blocking
+```
+
+The label keys are your choice. Pick whatever fits your organisation's conventions; Magos only cares that the selector on a Project or Workspace matches the labels you put on the policies.

@@ -1,4 +1,8 @@
-import { compileMDX } from "next-mdx-remote/rsc";
+import React from "react";
+import * as jsxRuntime from "react/jsx-runtime";
+import { compile } from "@mdx-js/mdx";
+import { VFile } from "vfile";
+import { matter as vfileMatter } from "vfile-matter";
 import path from "path";
 import { promises as fs } from "fs";
 import remarkGfm from "remark-gfm";
@@ -8,7 +12,7 @@ import rehypeSlug from "rehype-slug";
 import rehypeCodeTitles from "rehype-code-titles";
 import { page_routes, ROUTES } from "./routes-config";
 import { visit } from "unist-util-visit";
-import matter from "gray-matter";
+import grayMatter from "gray-matter";
 import { getIconName, hasSupportedExtension } from "./utils";
 
 // custom components imports
@@ -53,25 +57,48 @@ const components = {
 
 // can be used for other pages like blogs, Guides etc
 async function parseMdx<Frontmatter>(rawMdx: string) {
-  return await compileMDX<Frontmatter>({
-    source: rawMdx,
-    options: {
-      parseFrontmatter: true,
-      mdxOptions: {
-        rehypePlugins: [
-          preProcess,
-          rehypeCodeTitles,
-          rehypeCodeTitlesWithLogo,
-          rehypePrism,
-          rehypeSlug,
-          rehypeAutolinkHeadings,
-          postProcess,
-        ],
-        remarkPlugins: [remarkGfm],
-      },
-    },
-    components,
+  // Parse frontmatter
+  const vfile = new VFile(rawMdx);
+  vfileMatter(vfile, { strip: true });
+  const frontmatter = (vfile.data.matter ?? {}) as Frontmatter;
+
+  // Compile MDX to JS function body, always using production JSX transform
+  // to avoid the "_jsxDEV without development properties" error in React 19
+  const compiledMdx = await compile(vfile, {
+    outputFormat: "function-body",
+    development: false,
+    providerImportSource: undefined,
+    rehypePlugins: [
+      preProcess,
+      rehypeCodeTitles,
+      rehypeCodeTitlesWithLogo,
+      rehypePrism,
+      rehypeSlug,
+      rehypeAutolinkHeadings,
+      postProcess,
+    ],
+    remarkPlugins: [remarkGfm],
   });
+
+  const compiledSource = String(compiledMdx);
+
+  // Evaluate the compiled source using Function constructor
+  const fullScope = Object.assign(
+    { opts: jsxRuntime },
+    { frontmatter }
+  );
+  const keys = Object.keys(fullScope);
+  const values = Object.values(fullScope);
+  const hydrateFn = Reflect.construct(
+    Function,
+    keys.concat(`${compiledSource}`)
+  );
+  const Content = hydrateFn.apply(hydrateFn, values).default;
+
+  return {
+    content: React.createElement(Content, { components }),
+    frontmatter,
+  };
 }
 
 // logic for docs
@@ -129,7 +156,7 @@ function getDocsContentPath(slug: string) {
 }
 
 function justGetFrontmatterFromMD<Frontmatter>(rawMd: string): Frontmatter {
-  return matter(rawMd).data as Frontmatter;
+  return grayMatter(rawMd).data as Frontmatter;
 }
 
 export async function getAllChilds(pathString: string) {
