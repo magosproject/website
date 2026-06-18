@@ -4,7 +4,7 @@ import { PropsWithChildren } from "react";
 
 type NoteProps = PropsWithChildren & {
   title?: string;
-  type?: "note" | "danger" | "warning" | "success";
+  type?: "note" | "info" | "danger" | "warning" | "success";
 };
 
 export default function Note({
@@ -13,7 +13,9 @@ export default function Note({
   type = "note",
 }: NoteProps) {
   const noteClassNames = clsx({
-    "dark:bg-stone-950/25 bg-stone-50": type == "note",
+    "dark:bg-stone-950/25 bg-stone-50": type === "note",
+    "bg-primary/10 border-primary/35 dark:bg-primary/12 dark:border-primary/30":
+      type === "info",
     "dark:bg-red-950 bg-red-100 border-red-200 dark:border-red-900":
       type === "danger",
     "dark:bg-orange-950 bg-orange-100 border-orange-200 dark:border-orange-900":
@@ -26,7 +28,7 @@ export default function Note({
     <div
       className={cn(
         "border rounded-md px-5 mt-5 mb-7 text-sm tracking-wide",
-        noteClassNames
+        noteClassNames,
       )}
     >
       <p className="font-bold">{title}:</p>

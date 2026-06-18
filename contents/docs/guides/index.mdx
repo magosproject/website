@@ -6,6 +6,8 @@ description: Practical playbooks for connecting Git, managing secrets, gating pl
 The Guides section assumes you have read the [Concepts](/docs/concepts) and are ready to wire Magos into your real environment.
 
 - [Connecting Git Repositories](/docs/guides/git): public clones, HTTPS with personal access tokens, and SSH-key authentication via Kubernetes Secrets.
+- [OIDC Login](/docs/guides/oidc-login): configure Magos UI and API authentication against Google, Microsoft Entra ID, Keycloak, and other OIDC providers.
+  - [Google Identity Platform](/docs/guides/oidc-login/google-identity-platform): step-by-step guide for using Google as the OIDC provider.
 - [Policy Validation](/docs/guides/policies): write Kyverno `ValidatingPolicy` resources that gate `terraform apply` on plan output.
 - [Rollout Strategies](/docs/guides/rollout-strategies): labelling conventions, multi-region promotion, and failure handling.
 

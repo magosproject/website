@@ -1,0 +1,138 @@
+---
+title: OIDC Login
+description: Configure Magos to authenticate UI and API users with an OpenID Connect identity provider.
+---
+
+Magos can authenticate users through any standards-compliant OpenID Connect (OIDC) identity provider. The UI stays same-origin with the API: users open the UI, are redirected to the identity provider to sign in, and Magos stores the resulting identity in a secure [`HttpOnly`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie#httponly) session cookie. The flow uses [PKCE](https://oauth.net/2/pkce/), so no client secret is required for public clients.
+
+## What OIDC does today
+
+- Login for the Magos UI and API.
+- Identity resolution from OIDC claims (`sub`, `email`, `groups`, and any additional claim).
+- Session-based authentication using a signed, [`HttpOnly`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie#httponly) cookie.
+
+<Note type="info" title="Authorization status">
+  OIDC does **not** yet control which Projects or Workspaces a user can access. That authorization layer is planned to be implemented. Group claims are worth configuring now because they are the natural input for Magos RBAC when it lands.
+</Note>
+
+## Prerequisites
+
+- An OIDC identity provider reachable from the cluster.
+- A registered client (application) in that provider with the **authorization code** flow enabled.
+- The Magos callback URL registered: `https://<magos-host>/auth/oidc/callback`.
+- `auth.baseURL` set to the URL where users reach the Magos UI, for example `https://magos.example.com`.
+
+## Helm values
+
+```yaml
+auth:
+  enabled: true
+  baseURL: "https://magos.example.com"
+
+  admin:
+    enabled: false  # recommended: disable admin account when using OIDC
+
+  oidc:
+    enabled: true
+    issuerURL: https://accounts.google.com
+    clientID: <your-client-id>
+
+    # Only required for confidential clients (e.g. Google "Web application" type).
+    # Public clients that support PKCE do not need a secret.
+    clientSecretRef:
+      name: magos-oidc-secret
+      key: oidcClientSecret
+
+    usernameClaim: email   # claim used as the Magos username
+    groupsClaim: groups    # claim used for group membership; leave empty if your provider does not emit groups
+
+    # openid, profile, and email are always requested. Add extra scopes here,
+    # e.g. "groups" if your provider gates group membership behind a scope.
+    additionalScopes:
+      - groups
+
+  session:
+    ttl: 24h
+    cookieSecure: true  # set to true for HTTPS deployments
+```
+
+For confidential clients, create the Secret before installing the chart:
+
+```bash
+kubectl -n magos-system create secret generic magos-oidc-secret \
+  --from-literal=oidcClientSecret='<your-client-secret>'
+```
+
+Then install or upgrade:
+
+```bash
+helm upgrade --install magos \
+  oci://ghcr.io/magosproject/magos/charts/magos \
+  --namespace magos-system \
+  --create-namespace \
+  -f values.yaml
+```
+
+## The session model
+
+After a successful OIDC callback, Magos sets two cookies:
+
+- **`magos_session`** — an [`HttpOnly`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie#httponly), signed JWT containing the user's identity (subject, username, groups). Never readable by JavaScript.
+- **`magos_csrf`** — a readable token that the UI includes as `X-CSRF-Token` on state-changing requests. Prevents [cross-site request forgery](https://developer.mozilla.org/en-US/docs/Web/Security/Attacks/CSRF).
+
+Both cookies are scoped to `/` and expire according to `auth.session.ttl`. On logout, both are cleared.
+
+## Claim mapping
+
+Magos lets you choose which claims it reads:
+
+| Value | Default | Purpose |
+|---|---|---|
+| `auth.oidc.usernameClaim` | `email` | The human-readable identifier stored in the session |
+| `auth.oidc.groupsClaim` | `groups` | Group membership for future RBAC |
+
+`additionalScopes` adds OAuth2 scopes beyond `openid`, `profile`, and `email`, which are always requested. Use this when your provider gates group claims behind an extra scope (common with Keycloak and Entra ID).
+
+## Group claim caveats
+
+Group membership is optional and provider-specific:
+
+- **Google.** Standard ID tokens do not include group membership. Set `groupsClaim: ""` to suppress the lookup. See [Google Identity Platform](/docs/guides/oidc-login/google-identity-platform) for the full setup guide.
+- **Microsoft Entra ID.** Tenants with many groups may trigger group overage behavior where groups are not included inline. Check your token and configure Entra to emit groups in the token or via the Graph API.
+- **Keycloak, Zitadel, Dex, Auth0, Okta.** These commonly support custom claim mapping and usually work once the correct claim names are set.
+
+If your provider does not emit groups, authentication still works. Leave `groupsClaim` empty.
+
+## Provider-specific guides
+
+- [Google Identity Platform](/docs/guides/oidc-login/google-identity-platform)
+
+## Security notes
+
+- Set `auth.session.cookieSecure: true` for any HTTPS deployment.
+- Store the client secret in a Kubernetes Secret; never put it in a values file committed to Git.
+- Disable the built-in admin account (`auth.admin.enabled: false`) in production and rely on OIDC.
+- `auth.baseURL` must match the origin registered in your identity provider exactly, including the scheme and port.
+
+For a broader discussion of the boundary between OIDC user authentication and Kubernetes ServiceAccounts, see [Security and RBAC](/docs/operations/security).
+
+## Troubleshooting
+
+### `redirect_uri_mismatch`
+
+The `redirect_uri` sent to the provider (`<baseURL>/auth/oidc/callback`) does not match what is registered. Check that `auth.baseURL` is set correctly and that the registered redirect URI in your provider matches exactly.
+
+### Redirect loop back to login
+
+Usually one of:
+
+- The session cookie `Secure` flag is set but you are testing over plain HTTP. Set `auth.session.cookieSecure: false` for local testing.
+- The browser is hitting a different hostname than `auth.baseURL`.
+
+### Login works, but username is empty
+
+The claim named in `auth.oidc.usernameClaim` was not present in the token. Check your provider's token claims and either fix the claim name or request the necessary scope.
+
+### Groups are empty
+
+Check whether your provider emits group membership in the ID token at all. Many providers require additional configuration or scopes to include groups. Confirm first with your provider's token debugger before adjusting Magos values.

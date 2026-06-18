@@ -9,7 +9,11 @@ import { cn } from "@/lib/utils";
 import { SheetClose } from "@/components/ui/sheet";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
+
+function isActive(path: string, href: string) {
+  return path === href || path.startsWith(href + "/");
+}
 
 export default function SubLink({
   title,
@@ -21,32 +25,18 @@ export default function SubLink({
   tag,
 }: EachRoute & { level: number; isSheet: boolean }) {
   const path = usePathname();
-  const router = useRouter();
-  const [isOpen, setIsOpen] = useState(level == 0);
+  const [isOpen, setIsOpen] = useState(
+    () => level === 0 || isActive(path, href),
+  );
 
   useEffect(() => {
-    if (path == href || path.includes(href)) setIsOpen(true);
-  }, [href, path]);
-
-  const handleClick = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    // Toggle collapsible if has items
-    if (items && items.length > 0) {
-      setIsOpen(!isOpen);
+    if (isActive(path, href)) {
+      setIsOpen(true);
     }
-
-    // Always navigate to the page
-    router.push(href);
-  };
+  }, [path, href]);
 
   const Comp = (
-    <Anchor
-      activeClassName="text-primary dark:font-medium font-semibold"
-      href={href}
-      onClick={handleClick}
-    >
+    <Anchor activeClassName="text-primary dark:font-medium font-semibold" href={href}>
       {title}
       {tag && (
         <span className="bg-primary rounded-md px-1.5 py-0.5 mx-2 text-xs text-primary-foreground !font-normal">
@@ -80,31 +70,34 @@ export default function SubLink({
   return (
     <div className="flex flex-col gap-1 w-full">
       <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-        <CollapsibleTrigger asChild>
-          <div className="flex items-center justify-between cursor-pointer w-full pr-5">
-            <span className="w-[95%] overflow-hidden text-ellipsis text-start">
-              {titleOrLink}
-            </span>
-            <span className="sm:ml-0 -mr-1.5">
-              {!isOpen ? (
-                <ChevronRight className="h-[0.9rem] w-[0.9rem]" />
-              ) : (
+        <div className="flex items-center justify-between w-full pr-5">
+          <span className="w-[95%] overflow-hidden text-ellipsis text-start">
+            {titleOrLink}
+          </span>
+          <CollapsibleTrigger asChild>
+            <button
+              className="sm:ml-0 -mr-1.5 cursor-pointer shrink-0"
+              aria-label={isOpen ? "Collapse" : "Expand"}
+            >
+              {isOpen ? (
                 <ChevronDown className="h-[0.9rem] w-[0.9rem]" />
+              ) : (
+                <ChevronRight className="h-[0.9rem] w-[0.9rem]" />
               )}
-            </span>
-          </div>
-        </CollapsibleTrigger>
+            </button>
+          </CollapsibleTrigger>
+        </div>
         <CollapsibleContent>
           <div
             className={cn(
               "flex flex-col items-start sm:text-sm dark:text-stone-300/85 text-stone-800 ml-0.5 mt-2.5 gap-3",
-              level > 0 && "pl-4 border-l ml-1.5",
+              "pl-4 border-l ml-1.5",
             )}
           >
-            {items?.map((innerLink) => {
+            {items.map((innerLink) => {
               const modifiedItems = {
                 ...innerLink,
-                href: `${href + innerLink.href}`,
+                href: `${href}${innerLink.href}`,
                 level: level + 1,
                 isSheet,
               };

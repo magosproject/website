@@ -65,6 +65,7 @@ A few values worth knowing about:
 
 - `policy.kyverno.installCRD` controls whether the chart ships the `policies.kyverno.io/v1` `ValidatingPolicy` CRD itself. Leave it `true` on clusters that do not have Kyverno installed; set it to `false` on clusters that do, so Magos does not collide with Kyverno's own CRD lifecycle.
 - `logs.storage.*` and the bundled Postgres section configure the in-cluster data stores. For production we recommend pointing Magos at external Postgres and S3-compatible storage rather than relying on the bundled instances.
+- `auth.*` configures OIDC login for the UI and API. This is where you set the issuer URL, client ID, redirect URL, claim mapping, and Secret references for the client secret and session secret. See [OIDC Login](/docs/guides/oidc-login).
 
 ## Accessing the UI
 
@@ -75,6 +76,8 @@ kubectl -n magos-system port-forward svc/magos-ui 8080:80
 ```
 
 Then open `http://localhost:8080`. For production, expose the Service through an `Ingress`, a `Gateway`, or a `LoadBalancer` that fits your platform.
+
+If you enable OIDC login, make sure users access the UI through the same hostname you register with your identity provider, because the callback URL is served by Magos at `/auth/callback`.
 
 ## Next steps
 

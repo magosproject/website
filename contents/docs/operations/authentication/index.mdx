@@ -1,0 +1,118 @@
+---
+title: Authentication
+description: Configure how users sign in to Magos — admin account or OIDC.
+---
+
+Magos protects its UI and API with session-based authentication. Every request that is not explicitly public must carry a valid `magos_session` cookie. There are two ways to obtain one: the built-in admin account and OpenID Connect (OIDC).
+
+These two methods are independent and can be enabled simultaneously, though the recommended production setup is OIDC-only.
+
+## The session model
+
+After a successful login — either admin password or OIDC callback — Magos sets two cookies:
+
+| Cookie | [`HttpOnly`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie#httponly) | Purpose |
+|---|---|---|
+| `magos_session` | Yes | Signed JWT containing the user's identity. Never readable by JavaScript. |
+| `magos_csrf` | No | Random token the UI sends as `X-CSRF-Token` on state-changing requests. Prevents [cross-site request forgery](https://developer.mozilla.org/en-US/docs/Web/Security/Attacks/CSRF). |
+
+Both cookies expire according to `auth.session.ttl` (default `24h`). On logout, both are cleared. The session JWT is signed with `sessionSigningKey`; rotating that key invalidates all existing sessions.
+
+## Admin account
+
+The admin account is a single built-in user with the username `admin` and a bcrypt-hashed password. It exists so that a fresh installation works without requiring an OIDC provider to be configured first.
+
+**The admin account should be disabled in any environment other than local development.**
+
+### How it is configured
+
+When `auth.admin.enabled: true` and no `auth.secret.name` is provided, the chart auto-generates a random 24-character password and its bcrypt hash, storing both in a Secret named `<release>-auth`:
+
+| Secret key | Contents |
+|---|---|
+| `adminPassword` | The plain-text password (for retrieval) |
+| `adminPasswordHash` | The bcrypt hash (read by the API server) |
+| `sessionSigningKey` | Random key used to sign session JWTs |
+| `internalToken` | Token used by controllers to call the API |
+
+### Retrieving the generated password
+
+For a default install with release name `magos` in the `magos-system` namespace:
+
+```bash
+kubectl -n magos-system get secret magos-auth \
+  -o jsonpath='{.data.adminPassword}' | base64 -d
+```
+
+Replace `magos-auth` with `<release>-auth` if you used a different release name.
+
+### Bringing your own Secret
+
+If you manage Secrets externally (External Secrets Operator, Vault, Sealed Secrets), set `auth.secret.name` to an existing Secret name. The chart will not create or modify a Secret when this is set. Your Secret must contain at minimum:
+
+- `sessionSigningKey` — at least 32 random bytes (the API server refuses to start without it)
+- `internalToken` — any random string (used by controllers to authenticate against the API)
+- `adminPasswordHash` — bcrypt hash of the admin password; only required when `auth.admin.enabled: true`
+- `adminPassword` — the plain-text password; optional, only stored for manual retrieval via `kubectl`
+
+```bash
+kubectl -n magos-system create secret generic my-auth-secret \
+  --from-literal=sessionSigningKey="$(openssl rand -base64 48)" \
+  --from-literal=internalToken="$(openssl rand -base64 32)"
+```
+
+```yaml
+auth:
+  secret:
+    name: my-auth-secret
+```
+
+### Disabling the admin account
+
+Set `auth.admin.enabled: false`. When OIDC is configured, this is the recommended production setting — there is no shared password to rotate, no risk of credential leakage, and no privileged backdoor account.
+
+```yaml
+auth:
+  admin:
+    enabled: false
+  oidc:
+    enabled: true
+    # ...
+```
+
+## OpenID Connect
+
+OIDC lets users sign in with an existing identity provider — Google, Microsoft Entra ID, Keycloak, or any other standards-compliant provider. Magos uses the authorization code flow with [PKCE](https://oauth.net/2/pkce/), so no client secret is required for public clients.
+
+For the full configuration reference, see [OIDC Login](/docs/guides/oidc-login).
+
+Provider-specific setup guides:
+
+- [Google Identity Platform](/docs/guides/oidc-login/google-identity-platform)
+
+## Choosing between admin and OIDC
+
+| Scenario | Recommendation |
+|---|---|
+| Local development / quickstart | Admin account is fine. No extra infrastructure needed. |
+| Team environment | Enable OIDC. Disable admin. Every person signs in with their own identity. |
+| Production | OIDC only. Disable admin. Use a BYO Secret for all credentials. Set `auth.session.cookieSecure: true`. |
+
+## Security notes
+
+- Set `auth.session.cookieSecure: true` for any HTTPS deployment. Without it, the session cookie can be transmitted over plain HTTP.
+- The `sessionSigningKey` must be at least 32 bytes. Rotating it invalidates all active sessions.
+- Never commit the admin password, the signing key, or the OIDC client secret to Git. Use Kubernetes Secrets managed outside the chart values.
+- `auth.baseURL` must exactly match the origin the browser uses to reach Magos. Mismatches cause `redirect_uri_mismatch` errors with OIDC providers.
+
+For the broader isolation model and Kubernetes permissions, see [Security and RBAC](/docs/operations/security).
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,69 @@
+---
+title: Google Identity Platform
+description: Configure Magos to authenticate users with Google as the OIDC provider.
+---
+
+> **This guide is a work in progress.** The steps below will be completed with a full walkthrough for creating a Google OAuth 2.0 client and wiring it into Magos.
+
+Google Identity Platform can act as an OIDC provider for Magos. Users sign in with their Google account and are redirected back to Magos with a verified identity.
+
+## Key Google-specific details
+
+Before diving into the full guide, a few things differ from generic OIDC setup:
+
+- **Issuer URL:** `https://accounts.google.com`
+- **Client type:** Use the **Web application** type in Google Cloud Console. This produces a client secret, which you must supply via `auth.oidc.clientSecretRef`.
+- **Callback URL:** Register `https://<magos-host>/auth/oidc/callback` as an authorized redirect URI.
+- **Groups:** Google does not include group membership in standard ID tokens. Set `auth.oidc.groupsClaim: ""`.
+- **Username claim:** Use `email`. The `sub` claim is a numeric ID that is not human-readable.
+
+## Helm values
+
+```yaml
+auth:
+  enabled: true
+  baseURL: "https://magos.example.com"
+
+  admin:
+    enabled: false
+
+  oidc:
+    enabled: true
+    issuerURL: https://accounts.google.com
+    clientID: <your-google-client-id>
+    clientSecretRef:
+      name: magos-oidc-secret
+      key: oidcClientSecret
+    usernameClaim: email
+    groupsClaim: ""
+    # profile and email are always requested; nothing extra needed for Google
+    additionalScopes: []
+
+  session:
+    cookieSecure: true
+```
+
+Create the Secret with your Google client secret:
+
+```bash
+kubectl -n magos-system create secret generic magos-oidc-secret \
+  --from-literal=oidcClientSecret='<your-google-client-secret>'
+```
+
+## Full setup guide
+
+*Coming soon — this section will cover:*
+
+1. Creating a project in Google Cloud Console.
+2. Configuring the OAuth consent screen.
+3. Creating a **Web application** OAuth 2.0 client ID.
+4. Registering the authorized redirect URI.
+5. Retrieving the client ID and secret.
+6. Installing Magos with the values above.
+7. Verifying the login flow end-to-end.
+
+## RBAC note
+
+Google does not emit group membership in OIDC tokens. When Magos RBAC is available, Google users will need to be mapped by individual email address rather than group. This guide will be updated with the relevant configuration at that time.
+
+

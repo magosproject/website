@@ -1,9 +1,11 @@
 ---
 title: Security and RBAC
-description: The Magos isolation model, ServiceAccount conventions, and required cluster permissions.
+description: The Magos runner isolation model, ServiceAccount conventions, and required cluster permissions.
 ---
 
-Magos operates strictly on standard Kubernetes [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/). By utilizing isolated runner pods for every Workspace, the blast radius of any infrastructure failure or credential exposure is strictly minimized. This page describes the model in detail so you can decide whether it fits your threat model, and so you know what to audit in production.
+Magos operates strictly on standard Kubernetes [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) for its cluster-facing components. By utilizing isolated runner pods for every Workspace, the blast radius of any infrastructure failure or credential exposure is strictly minimized. This page describes the model in detail so you can decide whether it fits your threat model, and so you know what to audit in production.
+
+For user authentication (admin account and OIDC), see [Authentication](/docs/operations/authentication).
 
 ## The isolation model
 
@@ -61,6 +63,6 @@ A few assumptions we deliberately make and you should verify in your environment
 
 ## Audit
 
-Plan and apply Pods produce structured logs that the workspace controller archives, gzipped, to the configured S3-compatible bucket. Each archive is indexed by Workspace, run ID, and phase. The same run history is written to PostgreSQL and queryable through the API server. This is the audit surface for "what was applied, by whom, against which commit, with which variables", and it survives Pod deletion.
+Plan and apply Pods produce structured logs that the workspace controller archives, gzipped, to the configured S3-compatible bucket. Each archive is indexed by Workspace, run ID, and phase. The same run history is written to PostgreSQL and queryable through the API server. This is the audit surface for "what was applied, against which commit, with which variables", and it survives Pod deletion.
 
-For change attribution beyond the run record, lean on the upstream Git provider's audit log (who pushed which commit) and your Kubernetes audit log (who applied which Magos CR). Magos itself does not invent a separate user model.
+For change attribution beyond the run record, lean on the upstream Git provider's audit log (who pushed which commit), your OIDC provider's sign-in audit log, and your Kubernetes audit log (who applied which Magos CR). Magos does not maintain a separate identity store; it delegates entirely to the IdP you configure.

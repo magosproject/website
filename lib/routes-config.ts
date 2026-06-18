@@ -70,6 +70,16 @@ export const ROUTES: EachRoute[] = [
         href: "/policies",
       },
       {
+        title: "OIDC Login",
+        href: "/oidc-login",
+        items: [
+          {
+            title: "Google Identity Platform",
+            href: "/google-identity-platform",
+          },
+        ],
+      },
+      {
         title: "Rollout Strategies",
         href: "/rollout-strategies",
       },
@@ -79,6 +89,10 @@ export const ROUTES: EachRoute[] = [
     title: "Operations",
     href: "/operations",
     items: [
+      {
+        title: "Authentication",
+        href: "/authentication",
+      },
       {
         title: "Security and RBAC",
         href: "/security",
