@@ -74,8 +74,8 @@ export const ROUTES: EachRoute[] = [
         href: "/oidc-login",
         items: [
           {
-            title: "Google Identity Platform",
-            href: "/google-identity-platform",
+            title: "Google Auth",
+            href: "/google-auth",
           },
         ],
       },

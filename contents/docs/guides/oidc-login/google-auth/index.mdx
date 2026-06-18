@@ -1,11 +1,11 @@
 ---
-title: Google Identity Platform
+title: Google Auth
 description: Configure Magos to authenticate users with Google as the OIDC provider.
 ---
 
 > **This guide is a work in progress.** The steps below will be completed with a full walkthrough for creating a Google OAuth 2.0 client and wiring it into Magos.
 
-Google Identity Platform can act as an OIDC provider for Magos. Users sign in with their Google account and are redirected back to Magos with a verified identity.
+Google Auth can act as an OIDC provider for Magos. Users sign in with their Google account and are redirected back to Magos with a verified identity.
 
 ## Key Google-specific details
 
@@ -65,5 +65,6 @@ kubectl -n magos-system create secret generic magos-oidc-secret \
 ## RBAC note
 
 Google does not emit group membership in OIDC tokens. When Magos RBAC is available, Google users will need to be mapped by individual email address rather than group. This guide will be updated with the relevant configuration at that time.
+
 
 

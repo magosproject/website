@@ -97,7 +97,7 @@ Magos lets you choose which claims it reads:
 
 Group membership is optional and provider-specific:
 
-- **Google.** Standard ID tokens do not include group membership. Set `groupsClaim: ""` to suppress the lookup. See [Google Identity Platform](/docs/guides/oidc-login/google-identity-platform) for the full setup guide.
+- **Google.** Standard ID tokens do not include group membership. Set `groupsClaim: ""` to suppress the lookup. See [Google Auth](/docs/guides/oidc-login/google-auth) for the full setup guide.
 - **Microsoft Entra ID.** Tenants with many groups may trigger group overage behavior where groups are not included inline. Check your token and configure Entra to emit groups in the token or via the Graph API.
 - **Keycloak, Zitadel, Dex, Auth0, Okta.** These commonly support custom claim mapping and usually work once the correct claim names are set.
 
@@ -105,7 +105,7 @@ If your provider does not emit groups, authentication still works. Leave `groups
 
 ## Provider-specific guides
 
-- [Google Identity Platform](/docs/guides/oidc-login/google-identity-platform)
+- [Google Auth](/docs/guides/oidc-login/google-auth)
 
 ## Security notes
 
