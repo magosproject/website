@@ -7,7 +7,29 @@ This tutorial walks through the smallest complete Magos workflow: create a `Proj
 
 You should already have Magos [installed](/docs/getting-started/installation) in a Kubernetes cluster you can reach with `kubectl`. The walkthrough deliberately avoids `Rollout` so you can see the per-Workspace lifecycle without orchestration layered on top.
 
-## Step 1: Create a Project
+The examples below assume the default install: release name `magos` in the `magos-system` namespace. Adjust the names if you installed under a different release name or namespace.
+
+## Step 1: Open the Magos UI
+
+Authentication is enabled by default, with a built-in `admin` account whose password is auto-generated on first install and stored in the `magos-auth` Secret. Read it back with:
+
+```plaintext
+kubectl -n magos-system get secret magos-auth -o jsonpath='{.data.adminPassword}' | base64 -d
+```
+
+The default install does not create an Ingress, so reach the UI with a port-forward:
+
+```plaintext
+kubectl -n magos-system port-forward svc/magos-ui 8080:80
+```
+
+Then open `http://localhost:8080` and log in as `admin` with the password from the previous command. Keep this terminal running while you work through the rest of the tutorial — you can watch the `Project` and `Workspace` you are about to create reconcile in the UI as well as via `kubectl`.
+
+<Note type="info" title="Production">
+  For production, disable the built-in admin account (`auth.admin.enabled=false`) and use OIDC instead (`auth.oidc.enabled=true`). See [OpenID Connect](/docs/operations/authentication/oidc).
+</Note>
+
+## Step 2: Create a Project
 
 A `Project` is a logical boundary that groups Workspaces and supplies shared inputs. It does not execute anything itself. Create `project.yaml`:
 
@@ -35,7 +57,7 @@ kubectl get project data-platform
 
 With no `Rollout` of the same name in the namespace, the Project controller falls back to `DefaultParallel` mode: any Workspace pointing at this Project will be granted execution permission automatically.
 
-## Step 2: Create a Workspace
+## Step 3: Create a Workspace
 
 A `Workspace` declares where the Terraform module lives, which revision to reconcile, and which Terraform version to run. Create `workspace.yaml`:
 
@@ -70,7 +92,7 @@ Apply it:
 kubectl apply -f workspace.yaml
 ```
 
-## Step 3: Watch the reconciliation
+## Step 4: Watch the reconciliation
 
 Magos surfaces progress through Kubernetes-native status. Tail the Workspace:
 
@@ -88,7 +110,7 @@ You will see the `PHASE` field progress through the normal lifecycle:
 
 By default `spec.autoApply` is `true`, so the Workspace transitions from `Planned` straight into `Applying`. To require a manual approval between plan and apply, set `autoApply: false` and watch the Workspace pause at `Planned` until you approve it.
 
-## Step 4: Inspect what ran
+## Step 5: Inspect what ran
 
 Inspect the full status:
 
