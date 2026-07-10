@@ -53,7 +53,7 @@ Within the combined list of Variable Sets, later entries shadow earlier ones on 
 
 ## Cloud credentials
 
-`spec.serviceAccountName` sets the Kubernetes ServiceAccount the Plan and Apply Pods run as (default `magos-job`). Bind that ServiceAccount to a cloud identity — GKE Workload Identity, AWS IRSA, or Azure Workload Identity — and Terraform's provider authenticates with no static keys stored in the cluster. See [Cloud Provider Credentials](/docs/guides/cloud-credentials) for the per-provider setup.
+`spec.serviceAccountName` sets the Kubernetes ServiceAccount the Plan and Apply Pods run as (default `magos-job`). Bind that ServiceAccount to a cloud identity (GKE Workload Identity, AWS IRSA, or Azure Workload Identity), and Terraform's provider authenticates with no static keys stored in the cluster. See [Cloud Provider Credentials](/docs/guides/cloud-credentials) for the per-provider setup.
 
 ## Phases
 

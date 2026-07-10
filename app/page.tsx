@@ -45,6 +45,10 @@ export default function Home() {
             </a>
           </div>
 
+          <p className="mt-6 text-sm text-muted-foreground">
+            Built by folks who worked on Terraform, Atlantis, Kubernetes.
+          </p>
+
           {/* Featured Visual Frame / Animation */}
           <HeroAnimation />
         </div>

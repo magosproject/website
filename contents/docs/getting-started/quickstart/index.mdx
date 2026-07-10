@@ -23,7 +23,7 @@ The default install does not create an Ingress, so reach the UI with a port-forw
 kubectl -n magos-system port-forward svc/magos-ui 8080:80
 ```
 
-Then open `http://localhost:8080` and log in as `admin` with the password from the previous command. Keep this terminal running while you work through the rest of the tutorial — you can watch the `Project` and `Workspace` you are about to create reconcile in the UI as well as via `kubectl`.
+Then open `http://localhost:8080` and log in as `admin` with the password from the previous command. Keep this terminal running while you work through the rest of the tutorial. You can watch the `Project` and `Workspace` you are about to create reconcile in the UI as well as via `kubectl`.
 
 <Note type="info" title="Production">
   For production, disable the built-in admin account (`auth.admin.enabled=false`) and use OIDC instead (`auth.oidc.enabled=true`). See [OpenID Connect](/docs/operations/authentication/oidc).

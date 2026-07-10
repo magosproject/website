@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { ThemeProvider } from "@/components/contexts/theme-provider";
 import { Navbar } from "@/components/navbar";
 import { Space_Mono, Inter } from "next/font/google";
 import { Footer } from "@/components/footer";
@@ -48,7 +47,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" className="dark" style={{ colorScheme: "dark" }}>
       <head>
         <link
           rel="stylesheet"
@@ -58,20 +57,12 @@ export default function RootLayout({
       </head>
       <body
         className={`${sansFont.variable} ${monoFont.variable} font-sans antialiased tracking-wide`}
-        suppressHydrationWarning
       >
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="system"
-          enableSystem
-          disableTransitionOnChange
-        >
-          <Navbar />
-          <main className="sm:container mx-auto w-[90vw] h-auto scroll-smooth">
-            {children}
-          </main>
-          <Footer />
-        </ThemeProvider>
+        <Navbar />
+        <main className="sm:container mx-auto w-[90vw] h-auto scroll-smooth">
+          {children}
+        </main>
+        <Footer />
         <SpeedInsights />
         <Analytics />
       </body>
