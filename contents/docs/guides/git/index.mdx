@@ -1,9 +1,9 @@
 ---
 title: Connecting Git Repositories
-description: Configure Magos Workspaces to clone Terraform modules from public, HTTPS-authenticated, or SSH-authenticated Git repositories.
+description: Configure Magos Workspaces to clone Terraform modules using built-in Git transports or remote helpers.
 ---
 
-Every Magos `Workspace` reconciles a Terraform module that lives in Git. The `magos-job` image performs a shallow clone of `spec.source.repoURL` at `spec.source.targetRevision`, checks out the resolved commit, and runs `terraform init` against the directory under `spec.source.path`. This page covers the three supported authentication shapes.
+Every Magos `Workspace` reconciles a Terraform module that lives in Git. The `magos-job` image performs a shallow clone of `spec.source.repoURL` at `spec.source.targetRevision`, checks out the resolved commit, and runs `terraform init` against the directory under `spec.source.path`. This page covers the built-in authentication shapes and extending Git transport support with remote helpers.
 
 ## Public repositories
 
@@ -93,6 +93,44 @@ SSH host-key verification is intentionally disabled inside the runner Pod. The P
 
 If a Secret has both `sshPrivateKey` and `username`/`password`, the SSH key wins. This matches the precedence Git itself applies.
 
+## Git remote helpers
+
+Magos uses go-git for HTTP, HTTPS, SSH, the Git protocol, `file://`, local paths, and SCP-like SSH URLs. Repository URLs with another scheme are delegated to the native Git CLI, so a standard `git-remote-<scheme>` executable can provide the transport without changing the Workspace API.
+
+For example, this URL causes Git to invoke `git-remote-codecommit`:
+
+```yaml
+spec:
+  source:
+    repoURL: codecommit://profile@example
+    targetRevision: main
+```
+
+The default controller and job images include Git but do not include remote helpers. Build derivative versions of both images and install the helper under its canonical executable name. The controller image needs it for RefWatcher to run `git ls-remote`; the job image needs it to clone the repository.
+
+```dockerfile
+FROM ghcr.io/magosproject/magos/controller:VERSION
+USER 0
+COPY --chmod=0755 git-remote-codecommit /usr/local/bin/git-remote-codecommit
+USER 65532:65532
+```
+
+Create the corresponding job image from `ghcr.io/magosproject/magos/job:VERSION`. That image already runs as root, so it does not need the final `USER` directives. Select both derivative images with Helm values:
+
+```yaml
+image:
+  repository: registry.example.com/magos/controller-with-codecommit
+  tag: VERSION
+
+jobImage:
+  repository: registry.example.com/magos/job-with-codecommit
+  tag: VERSION
+```
+
+Remote helpers inherit the environment and Kubernetes ServiceAccount of the process invoking them. Configure RefWatcher with `controllers.refwatcher.serviceAccount`, `controllers.refwatcher.env`, and `controllers.refwatcher.envFrom`. Configure plan-job cloud identity with the Workspace's `spec.serviceAccountName`.
+
+Repository credentials injected into a plan job are also visible to its helper, but interpreting those variables is helper-specific. RefWatcher does not resolve per-Workspace repository credential Secrets, so any credentials it needs must come from its own ServiceAccount, environment, or referenced configuration.
+
 ## Rotation
 
 Rotating a credential Secret triggers an immediate refresh: the workspace controller watches Secret resources labelled `magosproject.io/secret-type=repository` and re-reconciles every Workspace whose `repoURL` matches the rotated Secret. The next Plan [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/) will pick up the new credentials.
@@ -106,6 +144,6 @@ Magos never copies repository credentials onto a Workspace CR. The credential fl
 1. The credential lives in a Secret in the same namespace as the Workspace.
 2. The workspace controller refers to that Secret through `valueFrom.secretKeyRef` in the Job spec.
 3. The kubelet resolves the env vars (`GIT_USERNAME`, `GIT_PASSWORD`, or `GIT_SSH_PRIVATE_KEY`) at Pod start.
-4. The `magos-job` binary reads those env vars, hands them to go-git, and exits when the clone is done.
+4. The `magos-job` binary reads those env vars and makes them available to the selected Git transport. For built-in transports, it hands them to go-git; remote helpers inherit them as environment variables.
 
 The controller process holds the Secret in its watch cache (because it needs to match `repoURL` to find the right Secret) but never writes credentials to status or logs. The cache for the workspace controller is restricted by label, so only `magosproject.io/secret-type=repository` Secrets are loaded; other Secrets in the namespace (including Variable-Set-referenced ones) are never read by the workspace controller.
